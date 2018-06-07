@@ -19,6 +19,7 @@ Etalons_names = ['ET_1A','ET_1B','ET_2A','ET_2B']
 # filepaths
 #-- FM campaign
 def FM_MTS_BB_extended_source(lvl2path,band,bb_temp=None,output='img'):
+    # From FM test MRS_RAD_04 (MRS spectrophotometric performance)
     if bb_temp == '800K':
         sci_imgs = {"1A":lvl2path +'FM1T00011282/MIRFM1T00011282_1_495_SE_2011-05-31T02h15m32_LVL2.fits',
                     "1B":lvl2path +'FM1T00011283/MIRFM1T00011283_1_495_SE_2011-05-31T03h12m30_LVL2.fits',
@@ -101,9 +102,13 @@ def FM_MTS_BB_extended_source(lvl2path,band,bb_temp=None,output='img'):
         return sci_imgs[band],bkg_imgs[band]
     elif output == 'img':
         from astropy.io import fits
-        return fits.open(sci_imgs[band])[0].data[0,:,:], fits.open(bkg_imgs[band])[0].data[0,:,:]
+        hdulist_sci,hdulist_bkg = fits.open(sci_imgs[band]), fits.open(bkg_imgs[band])
+        sci_data,bkg_data = hdulist_sci[0].data[0,:,:],hdulist_bkg[0].data[0,:,:]
+        hdulist_sci.close() ; hdulist_bkg.close()
+        return sci_data,bkg_data
 
 def MIRI_internal_calibration_source(lvl2path,band,campaign=None,output='img'):
+    # MRS_RAD_11 (MRS Calibration Source)
     """
     * 800K BB source
     * observed in different test campaigns
@@ -139,7 +144,7 @@ def MIRI_internal_calibration_source(lvl2path,band,campaign=None,output='img'):
                     "4BxA":lvl2path +'FM1T00012668/MIRFM1T00012668_4_494_SE_2011-07-06T17h26m09_LVL2.fits',
                     "4BxC":lvl2path +'FM1T00012668/MIRFM1T00012668_6_494_SE_2011-07-06T17h37m45_LVL2.fits',
                     "4CxA":lvl2path +'FM1T00012668/MIRFM1T00012668_7_494_SE_2011-07-06T17h43m55_LVL2.fits',
-                    "4CxB":lvl2path +'FM1T00012668/MIRFM1T00012668_8_494_SE_2011-07-06T17h49m45_LVL2.fits',}
+                    "4CxB":lvl2path +'FM1T00012668/MIRFM1T00012668_8_494_SE_2011-07-06T17h49m45_LVL2.fits'}
     elif campaign == 'OTIS':
         sci_imgs = {"1A":lvl2path +'MIRV00331001001P0000000002103_1_495_SE_2017-08-25T19h09m24_LVL2.fits',
                     "1B":lvl2path +'',
@@ -183,9 +188,13 @@ def MIRI_internal_calibration_source(lvl2path,band,campaign=None,output='img'):
         return sci_imgs[band]
     elif output == 'img':
         from astropy.io import fits
-        return fits.open(sci_imgs[band])[0].data[0,:,:]
+        hdulist_sci = fits.open(sci_imgs[band])
+        sci_data = hdulist_sci[0].data[0,:,:]
+        hdulist_sci.close()
+        return sci_data
 
 def FM_MTS_800K_BB_extended_source_through_etalon(lvl2path,band,etalon=None,output='img'):
+    # MRS_OPT_08 (MRS wavelength characterization)
     if etalon == 'ET1A':
         sci_imgs = {"1A":lvl2path +'FM1T00010937/MIRFM1T00010937_1_495_SE_2011-05-19T22h24m06_LVL2.fits',
                     "1B":lvl2path +'FM1T00010939/MIRFM1T00010939_1_495_SE_2011-05-20T00h04m44_LVL2.fits',
@@ -294,12 +303,16 @@ def FM_MTS_800K_BB_extended_source_through_etalon(lvl2path,band,etalon=None,outp
         return sci_imgs[band],bkg_imgs[band]
     elif output == 'img':
         from astropy.io import fits
-        return fits.open(sci_imgs[band])[0].data[0,:,:],fits.open(bkg_imgs[band])[0].data[0,:,:]
+        hdulist_sci,hdulist_bkg = fits.open(sci_imgs[band]), fits.open(bkg_imgs[band])
+        sci_data,bkg_data = hdulist_sci[0].data[0,:,:],hdulist_bkg[0].data[0,:,:]
+        hdulist_sci.close() ; hdulist_bkg.close()
+        return sci_data,bkg_data
 
 def FM_MTS_800K_BB_extended_source_through_etalon_through_pinhole(lvl2path,band,etalon=None,output='img'):
+    # MRS_OPT_02 (MRS Image Quality)
     if etalon == 'ET1A':
         sci_imgs = {"1A":lvl2path +'FM1T00012163/MIRFM1T00012163_1_495_SE_2011-06-25T08h53m56_LVL2.fits',
-                    "1B":lvl2path +'',
+                    "1B":lvl2path +'FM1T00012846/MIRFM1T00012846_1_495_SE_2011-07-11T00h02m43_LVL2.fits',
                     "1C":lvl2path +'',
                     "2A":lvl2path +'',
                     "2B":lvl2path +'',
@@ -405,7 +418,11 @@ def FM_MTS_800K_BB_extended_source_through_etalon_through_pinhole(lvl2path,band,
         return sci_imgs[band],bkg_imgs[band]
     elif output == 'img':
         from astropy.io import fits
-        return fits.open(sci_imgs[band])[0].data[0,:,:],0 #fits.open(bkg_imgs[band])[0].data[0,:,:]
+        hdulist_sci = fits.open(sci_imgs[band])
+        # hdulist_bkg = fits.open(bkg_imgs[band])
+        sci_data,bkg_data = hdulist_sci[0].data[0,:,:],0 # hdulist_bkg[0].data[0,:,:]
+        hdulist_sci.close() # ; hdulist_bkg.close()
+        return sci_data,bkg_data
 
 def RAL_FTS_ET_observations(obsDir,etalon=None):
     import numpy as np
@@ -430,7 +447,97 @@ def RAL_FTS_ET_observations(obsDir,etalon=None):
         wvnrs,etalon_data = np.array(wvnrs),np.array(etalon_data)
     return wvnrs,etalon_data
 
+def FM_MTS_800K_BB_MRS_RAD_06_raster(lvl2path,band,output='img'):
+    # MRS slope stability
+    sci_imgs = {"1A":lvl2path +'FM1T00011453/MIRFM1T00011453_1_495_SE_2011-06-03T21h10m39_LVL2.fits',
+                "1B":lvl2path +'FM1T00011455/MIRFM1T00011455_1_495_SE_2011-06-04T03h35m04_LVL2.fits',
+                "1C":lvl2path +'FM1T00011457/MIRFM1T00011457_1_495_SE_2011-06-04T09h56m24_LVL2.fits',
+                "2A":lvl2path +'FM1T00011453/MIRFM1T00011453_1_495_SE_2011-06-03T21h10m39_LVL2.fits',
+                "2B":lvl2path +'FM1T00011455/MIRFM1T00011455_1_495_SE_2011-06-04T03h35m04_LVL2.fits',
+                "2C":lvl2path +'FM1T00011457/MIRFM1T00011457_1_495_SE_2011-06-04T09h56m24_LVL2.fits',
+                "3A":lvl2path +'FM1T00011453/MIRFM1T00011453_1_494_SE_2011-06-03T21h10m20_LVL2.fits',
+                "3B":lvl2path +'FM1T00011455/MIRFM1T00011455_1_494_SE_2011-06-04T03h34m46_LVL2.fits',
+                "3C":lvl2path +'FM1T00011457/MIRFM1T00011457_1_494_SE_2011-06-04T09h56m06_LVL2.fits',
+                "4A":lvl2path +'FM1T00011453/MIRFM1T00011453_1_494_SE_2011-06-03T21h10m20_LVL2.fits',
+                "4B":lvl2path +'FM1T00011455/MIRFM1T00011455_1_494_SE_2011-06-04T03h34m46_LVL2.fits',
+                "4C":lvl2path +'FM1T00011457/MIRFM1T00011457_1_494_SE_2011-06-04T09h56m06_LVL2.fits'}
+
+    bkg_imgs = {"1A":lvl2path +'FM1T00011454/MIRFM1T00011454_1_495_SE_2011-06-04T00h23m34_LVL2.fits',
+                "1B":lvl2path +'FM1T00011456/MIRFM1T00011456_1_495_SE_2011-06-04T06h45m24_LVL2.fits',
+                "1C":lvl2path +'FM1T00011458/MIRFM1T00011458_1_495_SE_2011-06-04T13h06m10_LVL2.fits',
+                "2A":lvl2path +'FM1T00011454/MIRFM1T00011454_1_495_SE_2011-06-04T00h23m34_LVL2.fits',
+                "2B":lvl2path +'FM1T00011456/MIRFM1T00011456_1_495_SE_2011-06-04T06h45m24_LVL2.fits',
+                "2C":lvl2path +'FM1T00011458/MIRFM1T00011458_1_495_SE_2011-06-04T13h06m10_LVL2.fits',
+                "3A":lvl2path +'FM1T00011454/MIRFM1T00011454_1_494_SE_2011-06-04T00h23m15_LVL2.fits',
+                "3B":lvl2path +'FM1T00011456/MIRFM1T00011456_1_494_SE_2011-06-04T06h45m05_LVL2.fits',
+                "3C":lvl2path +'FM1T00011458/MIRFM1T00011458_1_494_SE_2011-06-04T13h05m52_LVL2.fits',
+                "4A":lvl2path +'FM1T00011454/MIRFM1T00011454_1_494_SE_2011-06-04T00h23m15_LVL2.fits',
+                "4B":lvl2path +'FM1T00011456/MIRFM1T00011456_1_494_SE_2011-06-04T06h45m05_LVL2.fits',
+                "4C":lvl2path +'FM1T00011458/MIRFM1T00011458_1_494_SE_2011-06-04T13h05m52_LVL2.fits'}
+    if output == 'filename':
+        return sci_imgs[band],bkg_imgs[band]
+    elif output == 'img':
+        from astropy.io import fits
+        hdulist_sci = fits.open(sci_imgs[band])
+        hdulist_bkg = fits.open(bkg_imgs[band])
+        sci_data,bkg_data = hdulist_sci[0].data[0,:,:], hdulist_bkg[0].data[0,:,:]
+        hdulist_sci.close(); hdulist_bkg.close()
+        return sci_data,bkg_data
+
+def FM_MTS_800K_BB_MRS_RAD_08(lvl2path,band,wp_filter=None,output='img'):
+    # MRS Out of band radiation sensitivity
+    if wp_filter == 'LWP':
+        sci_imgs = {"1A":lvl2path +'FM1T00010838/MIRFM1T00010838_1_495_SE_2011-05-17T19h15m39_LVL2.fits',
+                    "1B":lvl2path +'FM1T00010838/MIRFM1T00010838_4_495_SE_2011-05-17T19h47m12_LVL2.fits',
+                    "1C":lvl2path +'FM1T00010838/MIRFM1T00010838_7_495_SE_2011-05-17T20h19m18_LVL2.fits',
+                    "2A":lvl2path +'FM1T00010838/MIRFM1T00010838_1_495_SE_2011-05-17T19h15m39_LVL2.fits',
+                    "2B":lvl2path +'FM1T00010838/MIRFM1T00010838_4_495_SE_2011-05-17T19h47m12_LVL2.fits',
+                    "2C":lvl2path +'FM1T00010838/MIRFM1T00010838_7_495_SE_2011-05-17T20h19m18_LVL2.fits',
+                    "3A":lvl2path +'FM1T00010838/MIRFM1T00010838_1_494_SE_2011-05-17T19h15m33_LVL2.fits',
+                    "3B":lvl2path +'FM1T00010838/MIRFM1T00010838_4_494_SE_2011-05-17T19h47m06_LVL2.fits',
+                    "3C":lvl2path +'FM1T00010838/MIRFM1T00010838_7_494_SE_2011-05-17T20h19m12_LVL2.fits',
+                    "4A":lvl2path +'FM1T00010838/MIRFM1T00010838_1_494_SE_2011-05-17T19h15m33_LVL2.fits',
+                    "4B":lvl2path +'FM1T00010838/MIRFM1T00010838_4_494_SE_2011-05-17T19h47m06_LVL2.fits',
+                    "4C":lvl2path +'FM1T00010838/MIRFM1T00010838_7_494_SE_2011-05-17T20h19m12_LVL2.fits'}
+
+    elif wp_filter == 'SWP':
+        sci_imgs = {"1A":lvl2path +'FM1T00010838/MIRFM1T00010838_2_495_SE_2011-05-17T19h25m57_LVL2.fits',
+                    "1B":lvl2path +'FM1T00010838/MIRFM1T00010838_5_495_SE_2011-05-17T19h57m37_LVL2.fits',
+                    "1C":lvl2path +'FM1T00010838/MIRFM1T00010838_8_495_SE_2011-05-17T20h29m38_LVL2.fits',
+                    "2A":lvl2path +'FM1T00010838/MIRFM1T00010838_2_495_SE_2011-05-17T19h25m57_LVL2.fits',
+                    "2B":lvl2path +'FM1T00010838/MIRFM1T00010838_5_495_SE_2011-05-17T19h57m37_LVL2.fits',
+                    "2C":lvl2path +'FM1T00010838/MIRFM1T00010838_8_495_SE_2011-05-17T20h29m38_LVL2.fits',
+                    "3A":lvl2path +'FM1T00010838/MIRFM1T00010838_2_494_SE_2011-05-17T19h25m51_LVL2.fits',
+                    "3B":lvl2path +'FM1T00010838/MIRFM1T00010838_5_494_SE_2011-05-17T19h57m31_LVL2.fits',
+                    "3C":lvl2path +'FM1T00010838/MIRFM1T00010838_8_494_SE_2011-05-17T20h29m32_LVL2.fits',
+                    "4A":lvl2path +'FM1T00010838/MIRFM1T00010838_2_494_SE_2011-05-17T19h25m51_LVL2.fits',
+                    "4B":lvl2path +'FM1T00010838/MIRFM1T00010838_5_494_SE_2011-05-17T19h57m31_LVL2.fits',
+                    "4C":lvl2path +'FM1T00010838/MIRFM1T00010838_8_494_SE_2011-05-17T20h29m32_LVL2.fits'}
+
+    bkg_imgs = {"1A":lvl2path +'FM1T00010838/MIRFM1T00010838_3_495_SE_2011-05-17T19h35m52_LVL2.fits',
+                "1B":lvl2path +'FM1T00010838/MIRFM1T00010838_6_495_SE_2011-05-17T20h08m03_LVL2.fits',
+                "1C":lvl2path +'FM1T00010838/MIRFM1T00010838_9_495_SE_2011-05-17T20h40m04_LVL2.fits',
+                "2A":lvl2path +'FM1T00010838/MIRFM1T00010838_3_495_SE_2011-05-17T19h35m52_LVL2.fits',
+                "2B":lvl2path +'FM1T00010838/MIRFM1T00010838_6_495_SE_2011-05-17T20h08m03_LVL2.fits',
+                "2C":lvl2path +'FM1T00010838/MIRFM1T00010838_9_495_SE_2011-05-17T20h40m04_LVL2.fits',
+                "3A":lvl2path +'FM1T00010838/MIRFM1T00010838_3_494_SE_2011-05-17T19h35m46_LVL2.fits',
+                "3B":lvl2path +'FM1T00010838/MIRFM1T00010838_6_494_SE_2011-05-17T20h07m57_LVL2.fits',
+                "3C":lvl2path +'FM1T00010838/MIRFM1T00010838_9_494_SE_2011-05-17T20h39m58_LVL2.fits',
+                "4A":lvl2path +'FM1T00010838/MIRFM1T00010838_3_494_SE_2011-05-17T19h35m46_LVL2.fits',
+                "4B":lvl2path +'FM1T00010838/MIRFM1T00010838_6_494_SE_2011-05-17T20h07m57_LVL2.fits',
+                "4C":lvl2path +'FM1T00010838/MIRFM1T00010838_9_494_SE_2011-05-17T20h39m58_LVL2.fits'}
+    if output == 'filename':
+        return sci_imgs[band],bkg_imgs[band]
+    elif output == 'img':
+        from astropy.io import fits
+        hdulist_sci = fits.open(sci_imgs[band])
+        hdulist_bkg = fits.open(bkg_imgs[band])
+        sci_data,bkg_data = hdulist_sci[0].data[0,:,:], hdulist_bkg[0].data[0,:,:]
+        hdulist_sci.close(); hdulist_bkg.close()
+        return sci_data,bkg_data
+
 def FM_MTS_800K_BB_MRS_OPT_01_raster(lvl2path,pointing='all',output='img'):
+    # MRS FOV and Distortion Measurement
     """
     * all pointings are in DGA setup 1A/2A
     """
@@ -502,9 +609,13 @@ def FM_MTS_800K_BB_MRS_OPT_01_raster(lvl2path,pointing='all',output='img'):
         return sci_imgs,bkg_file
     elif (pointing != 'all') & (output=='img'):
         from astropy.io import fits
-        return fits.open(sci_imgs[pointing])[0].data[0,:,:],fits.open(bkg_file)[0].data[0,:,:]
+        hdulist_sci,hdulist_bkg = fits.open(sci_imgs[pointing]), fits.open(bkg_file)
+        sci_data,bkg_data = hdulist_sci[0].data[0,:,:],hdulist_bkg[0].data[0,:,:]
+        hdulist_sci.close() ; hdulist_bkg.close()
+        return sci_data,bkg_data
 
 def FM_MTS_800K_BB_MRS_OPT_02_obs(lvl2path,pointing='all',output='img'):
+    # MRS Image Quality
     """
     * all pointings are in DGA setup 1A/2A
     """
@@ -527,9 +638,13 @@ def FM_MTS_800K_BB_MRS_OPT_02_obs(lvl2path,pointing='all',output='img'):
         return sci_imgs,bkg_imgs
     elif (pointing != 'all') & (output=='img'):
         from astropy.io import fits
-        return fits.open(sci_imgs[pointing])[0].data[0,:,:],fits.open(bkg_imgs[pointing])[0].data[0,:,:]
+        hdulist_sci,hdulist_bkg = fits.open(sci_imgs[pointing]), fits.open(bkg_imgs[pointing])
+        sci_data,bkg_data = hdulist_sci[0].data[0,:,:],hdulist_bkg[0].data[0,:,:]
+        hdulist_sci.close() ; hdulist_bkg.close()
+        return sci_data,bkg_data
 
 def FM_MTS_800K_BB_MRS_OPT_06_raster(lvl2path,position=None,pointing='all',output='img'):
+    # MRS Across slit scan
     """
     * all pointings are in DGA setup 1A/2A
     """
@@ -621,7 +736,31 @@ def FM_MTS_800K_BB_MRS_OPT_06_raster(lvl2path,position=None,pointing='all',outpu
         return sci_imgs,bkg_file
     elif (pointing != 'all') & (output=='img'):
         from astropy.io import fits
-        return fits.open(sci_imgs[pointing])[0].data[0,:,:],fits.open(bkg_file)[0].data[0,:,:]
+        hdulist_sci,hdulist_bkg = fits.open(sci_imgs[pointing]), fits.open(bkg_file)
+        sci_data,bkg_data = hdulist_sci[0].data[0,:,:],hdulist_bkg[0].data[0,:,:]
+        hdulist_sci.close() ; hdulist_bkg.close()
+        return sci_data,bkg_data
+    elif (pointing != 'all') & (output=='filename'):
+        return sci_imgs[pointing],bkg_file
+
+def FM_MTS_800K_BB_MRS_OPT_08(lvl2path,wp_filter=None,output='img'):
+    # MRS Wavelength Characterization
+    # Wave-Pass (wp) filter can be Long-Wave-Pass (LWP) filter or Short-Wave-Pass (SWP) filter.
+    sci_imgs = {'LWP':lvl2path+'FM1T00010841/MIRFM1T00010841_1_495_SE_2011-05-17T22h54m09_LVL2.fits',
+                'LWP_HOLE':lvl2path+'FM1T00010842/MIRFM1T00010842_1_495_SE_2011-05-17T23h35m45_LVL2.fits',
+                'SWP':lvl2path+'FM1T00010950/MIRFM1T00010950_1_495_SE_2011-05-20T09h25m54_LVL2.fits',
+                'SWP_HOLE':lvl2path+'FM1T00010951/MIRFM1T00010951_1_495_SE_2011-05-20T10h16m00_LVL2.fits'}
+    bkg_imgs = {'LWP':lvl2path+'FM1T00012203/MIRFM1T00012203_1_495_SE_2011-06-27T22h03m11_LVL2.fits',
+                'SWP':lvl2path+'FM1T00010953/MIRFM1T00010953_1_495_SE_2011-05-20T11h50m14_LVL2.fits'}
+    if output == 'img':
+        from astropy.io import fits
+        hdulist_filter,hdulist_hole,hdulist_bkg = fits.open(sci_imgs[wp_filter]),fits.open(sci_imgs[wp_filter+'_HOLE']),fits.open(bkg_imgs[wp_filter])
+        filter_data,hole_data,bkg_data = hdulist_filter[0].data[0,:,:],hdulist_hole[0].data[0,:,:],hdulist_bkg[0].data[0,:,:]
+        return filter_data,hole_data,bkg_data
+    elif output == 'filename':
+            return sci_imgs[wp_filter],sci_imgs[wp_filter+'_HOLE'],bkg_imgs[wp_filter]
+
+
 
 #-- CV1RR & CV2 & CV3 data
 def CV_800K_BB_MRS_OPT_02_obs(dataDir,campaign=None,pointing='all',output='img'):
@@ -644,7 +783,10 @@ def CV_800K_BB_MRS_OPT_02_obs(dataDir,campaign=None,pointing='all',output='img')
             return MIRIMPSF_dictionary
         elif (pointing != 'all') & (output=='img'):
             from astropy.io import fits
-            return fits.open(dataDir+MIRIMPSF_dictionary[campaign+'_'+pointing][1])[0].data[0,:,:],fits.open(dataDir+MIRIMPSF_dictionary[campaign+'_'+pointing][3])[0].data[0,:,:]
+            hdulist_sci,hdulist_bkg = fits.open(dataDir+MIRIMPSF_dictionary[campaign+'_'+pointing][1]), fits.open(dataDir+MIRIMPSF_dictionary[campaign+'_'+pointing][3])
+            sci_data,bkg_data = hdulist_sci[0].data[0,:,:],hdulist_bkg[0].data[0,:,:]
+            hdulist_sci.close() ; hdulist_bkg.close()
+            return sci_data,bkg_data
     elif campaign == 'CV3':
         pointings = ['Q'+str(i) for i in range(17)]
         for point in pointings:
@@ -654,7 +796,10 @@ def CV_800K_BB_MRS_OPT_02_obs(dataDir,campaign=None,pointing='all',output='img')
             return MIRIMPSF_dictionary
         elif (pointing != 'all') & (output=='img'):
             from astropy.io import fits
-            return fits.open(dataDir+MIRIMPSF_dictionary[campaign+'_'+pointing][1])[0].data[0,:,:],fits.open(dataDir+MIRIMPSF_dictionary[campaign+'_'+pointing][3])[0].data[0,:,:]
+            hdulist_sci,hdulist_bkg = fits.open(dataDir+MIRIMPSF_dictionary[campaign+'_'+pointing][1]), fits.open(dataDir+MIRIMPSF_dictionary[campaign+'_'+pointing][3])
+            sci_data,bkg_data = hdulist_sci[0].data[0,:,:],hdulist_bkg[0].data[0,:,:]
+            hdulist_sci.close() ; hdulist_bkg.close()
+            return sci_data,bkg_data
         """
         Dictionary keys are equivalent to PSF measurements in CV2 and CV3 tests (with different pointings).
         Dictionary indeces within keys, for CV2 obs. are equivalent to:
@@ -688,7 +833,10 @@ def CV_800K_BB_MRS_OPT_02_obs(dataDir,campaign=None,pointing='all',output='img')
             return sci_imgs
         elif (pointing != 'all') & (output=='img'):
             from astropy.io import fits
-            return fits.open(sci_imgs[pointing])[0].data[0,:,:]
+            hdulist_sci = fits.open(sci_imgs[pointing])
+            sci_data = hdulist_sci[0].data[0,:,:]
+            hdulist_sci.close()
+            return sci_data
 
 #-- OTIS campaign
 def OTIS_ASPA_semiextended_source(lvl2path,band,pointing=None,output='img'):
@@ -748,4 +896,7 @@ def OTIS_ASPA_semiextended_source(lvl2path,band,pointing=None,output='img'):
         return sci_imgs[band],bkg_imgs[band]
     elif output == 'img':
         from astropy.io import fits
-        return fits.open(sci_imgs[band])[0].data[0,:,:],fits.open(bkg_imgs[band])[0].data[0,:,:]
+        hdulist_sci,hdulist_bkg = fits.open(sci_imgs[band]), fits.open(bkg_imgs[band])
+        sci_data,bkg_data = hdulist_sci[0].data[0,:,:],hdulist_bkg[0].data[0,:,:]
+        hdulist_sci.close() ; hdulist_bkg.close()
+        return sci_data,bkg_data

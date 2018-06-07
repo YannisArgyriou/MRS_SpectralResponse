@@ -32,7 +32,7 @@ def get_cdps(band,cdpDir,output='img'):
     # psf cdp, compiled by Adrian Glauser
     psf_subchan_name = band[0]+subchan_names[band[1]]
     psf_file = os.path.join(cdpDir,\
-      'MIRI_FM_%s_%s_PSF_05.02.00.fits' % (detnick,psf_subchan_name))
+      'MIRI_FM_%s_%s_PSF_7B.02.00.fits' % (detnick,psf_subchan_name))
 
     # spatial and spectral resolution cdp, compiled by Alvaro Labiano
     if int(band[0]) < 3: resol_subchan_name = '12'
@@ -127,18 +127,139 @@ def straylightCorrection(sci_img,sliceMap,R=50, k=1):
     #apply mask to science img
     img_gap = sci_img*mask
 
-    img_gap[img_gap>0.02*np.max(sci_img[sliceMap>0])] = 0 # avoid cosmic rays contaminating result
-    img_gap[img_gap<0] = 0 # set pixels less than zero to 0
+    # img_gap[img_gap>0.02*np.max(sci_img[sliceMap>0])] = 0 # avoid cosmic rays contaminating result
+    # img_gap[img_gap<0] = 0 # set pixels less than zero to 0
     img_gap = convolve(img_gap, Box2DKernel(3)) # smooth gap pixels with Boxkernel
     img_gap*=mask # reset sci pixels to 0
     # convolve gap pixel img with weight kernel
     astropy_conv = convolve(img_gap, w)
-    # normalize straylight flux by weights
+    # normalize straylight flux by sum of weights
     norm_conv = convolve(mask, w)
     astropy_conv /= norm_conv
     # reinstate gap pixels to previous values
     #astropy_conv[sliceMap==0] = img_gap[sliceMap==0]
     return sci_img-astropy_conv
+
+def straylightManga(band,sci_img,err_img,sliceMap,det_dims=(1024,1032)):
+    from scipy.interpolate import splrep,BSpline
+    nx = det_dims[1]
+    ny = det_dims[0]
+
+    # Get rid of any nans
+    sci_img[np.isnan(sci_img)] = 0
+    # Get rid of any negative values
+    sci_img[sci_img<0] = 0
+
+    # Make a simple mask from the slice map for illustrative purposes
+    simplemask = np.full(det_dims,0)
+    simplemask[np.nonzero(sliceMap)] = 1.
+
+    # Define the ids of the individual slices
+    sliceid1=[111,121,110,120,109,119,108,118,107,117,106,116,105,115,104,114,103,113,102,112,101]
+    sliceid2=[201,210,202,211,203,212,204,213,205,214,206,215,207,216,217,209] # 208,
+    sliceid3=[316,308,315,307,314,306,313,305,312,304,311,303,310,302,309,301]
+    sliceid4=[412,406,411,405,410,404,409,403,408,402,407,401]
+
+    if band[0] in ['1','2']:
+        sliceid1,sliceid2 = sliceid1,sliceid2
+    elif band[0] in ['3','4']:
+        sliceid1,sliceid2 = sliceid4,sliceid3
+    nslice1,nslice2 = len(sliceid1),len(sliceid2)
+
+    # Make our mask for straylight purposes dynamically
+    mask = np.zeros(det_dims)
+
+    # At the edges and middle of the detector we'll select pixels at least 5 pixels away from the nearest slice to use in creating our model
+    optspace=5
+
+    # In each gap between slices we'll select the pixel with the lowest flux
+    # Loop up rows
+    for i in range(ny):
+        # Define temporary vector of slicenum along this row
+        temp = sliceMap[i,:]
+        # Left edge of detector
+        indxr = np.where(temp == sliceid1[0])[0]
+        mask[i,:indxr[0]-optspace] = 1
+        # Left-half slices
+        for j in range(nslice1-1):
+            indxl = np.where(temp == sliceid1[j])[0]
+            indxr = np.where(temp == sliceid1[j+1])[0]
+            flux  = sci_img[i,indxl[-1]+1:indxr[0]-1] # signal in pixels between two stripes/slices on the detector
+            indx  = np.where(flux == min(flux))[0]
+            mask[i,indx[0]+(indxl[-1]+1)] = 1
+        # Mid-detector pixels
+        indxl = np.where(temp == sliceid1[-1])[0]
+        indxr = np.where(temp == sliceid2[0])[0]
+        mask[i,indxl[-1]+optspace:indxr[0]-optspace] = 1
+        # Right-half slices
+        for j in range(nslice2-1):
+            indxl = np.where(temp == sliceid2[j])[0]
+            indxr = np.where(temp == sliceid2[j+1])[0]
+            flux  = sci_img[i,indxl[-1]+1:indxr[0]-1] # signal in pixels between two stripes/slices on the detector
+            indx  = np.where(flux == min(flux))[0]
+            mask[i,indx[0]+(indxl[-1]+1)] = 1
+        # Right edge of detector
+        indxl = np.where(temp == sliceid2[-1])[0]
+        mask[i,indxl[-1]+optspace:] = 1
+
+    # Mask the data
+    masked_data = sci_img*mask
+
+    # Create the scattered light array
+    scatmodel_pass1 = np.zeros(det_dims)
+    scatmodel_pass2 = np.zeros(det_dims)
+    # Define pixel vectors
+    xvec = np.arange(nx)
+    yvec = np.arange(ny)
+
+    # Bspline the unmasked pixels looping along each row
+    for i in range(ny):
+        indx  = np.where(mask[i,:] == 1)[0] # select only unmasked pixels
+        thisx = xvec[indx]
+        thisf = sci_img[i,indx]
+        var = (err_img[i,indx]**2)[~np.isnan(err_img[i,indx])].sum()
+    #     var = np.var(thisf[~np.isnan(thisf)])
+        w = np.full(len(thisx),1.0/var)
+
+        everyn = 5
+        len_thisx = len(thisx)
+        nbkpts = (len_thisx / everyn)
+        xspot = np.arange(nbkpts)*(len_thisx / (nbkpts-1))
+        bkpt = thisx[xspot]
+        bkpt = bkpt.astype(float)
+        fullbkpt = bkpt.copy()
+
+        t, c, k = splrep(thisx, thisf, w=w, task=-1, t=fullbkpt[1:-1])
+        spline = BSpline(t, c, k, extrapolate=False)
+        scatmodel_pass1[i,:] = spline(xvec) # expand spline to the full range of x values
+
+    # Get rid of nans:
+    scatmodel_pass1[np.isnan(scatmodel_pass1)] = 0
+
+    # Get rid of negative spline values
+    scatmodel_pass1[scatmodel_pass1<0] = 0
+
+    # Bspline again in the Y direction
+    for i in range(nx):
+        thisy = yvec[~np.isnan(scatmodel_pass1[:,i])]
+        thisf = scatmodel_pass1[:,i][~np.isnan(scatmodel_pass1[:,i])]
+    #     var = (err_img[:,i]**2)[~np.isnan(err_img[:,i])].sum()
+        var = np.var(thisf[~np.isnan(thisf)])
+        w = np.full(len(thisy),1./var)
+
+        everyn = 30
+        len_thisy = len(thisy)
+        nbkpts = (len_thisy / everyn)
+        yspot = np.arange(nbkpts)*(len_thisy / (nbkpts-1))
+        bkpt = thisy[yspot]
+        bkpt = bkpt.astype(float)
+        fullbkpt = bkpt.copy()
+
+        t, c, k = splrep(thisy, thisf, w=w,task=-1, t=fullbkpt[1:-1]) # spline breakpoint every 30 values
+        spline = BSpline(t, c, k, extrapolate=False)
+        scatmodel_pass2[:,i] = spline(yvec)
+
+    return sci_img - scatmodel_pass2
 
 #-compute
 def getSpecR(lamb0=None,band=None,specres_table=None):
@@ -238,7 +359,7 @@ def spectral_gridding_linearR(band=None,d2cMaps=None,oversampling = 1.):
 
     return np.array(lambcens),np.array(lambfwhms)
 
-def point_source_centroiding(sci_img,band,d2cMaps,spec_grid=None,fit='2D'):
+def point_source_centroiding(band,sci_img,d2cMaps,spec_grid=None,fit='2D',center=None):
     import mrs_aux as maux
     # distortion maps
     sliceMap  = d2cMaps['sliceMap']
@@ -252,32 +373,33 @@ def point_source_centroiding(sci_img,band,d2cMaps,spec_grid=None,fit='2D'):
     fov_lims  = [alphaMap[np.nonzero(lambdaMap)].min(),alphaMap[np.nonzero(lambdaMap)].max()]
 
     print 'STEP 1: Rough centroiding'
-    # premise> center of point source is located in slice with largest signal
-    # across-slice center:
-    sum_signals = np.zeros(nslices)
-    for islice in xrange(1+nslices):
-        sum_signals[islice-1] = sci_img[(sliceMap == 100*int(band[0])+islice) & (~np.isnan(sci_img))].sum()
-    source_center_slice = np.argmax(sum_signals)+1
+    if center is None:
+        # premise> center of point source is located in slice with largest signal
+        # across-slice center:
+        sum_signals = np.zeros(nslices)
+        for islice in xrange(1+nslices):
+            sum_signals[islice-1] = sci_img[(sliceMap == 100*int(band[0])+islice) & (~np.isnan(sci_img))].sum()
+        source_center_slice = np.argmax(sum_signals)+1
 
-    print 'Slice {} has the largest summed flux'.format(source_center_slice)
+        # along-slice center:
+        det_dims = (1024,1032)
+        img = np.full(det_dims,0.)
+        sel = (sliceMap == 100*int(band[0])+source_center_slice)
+        img[sel]  = sci_img[sel]
 
-    # along-slice center:
-    det_dims = (1024,1032)
-    img = np.full(det_dims,0.)
-    sel = (sliceMap == 100*int(band[0])+source_center_slice)
-    img[sel]  = sci_img[sel]
-
-    first_nonzero_row = 0
-    while all(img[first_nonzero_row,:][~np.isnan(img[first_nonzero_row,:])] == 0.): first_nonzero_row+=1
-    source_center_alpha = alphaMap[first_nonzero_row,img[first_nonzero_row,:].argmax()]
-
+        first_nonzero_row = 0
+        while all(img[first_nonzero_row,:][~np.isnan(img[first_nonzero_row,:])] == 0.): first_nonzero_row+=1
+        source_center_alpha = alphaMap[first_nonzero_row,img[first_nonzero_row,:].argmax()]
+    else:
+        source_center_slice,source_center_alpha = center[0],center[1]
     # summary:
+    print 'Slice {} has the largest summed flux'.format(source_center_slice)
     print 'Source position: beta = {}arcsec, alpha = {}arcsec \n'.format(round(unique_betas[source_center_slice-1],2),round(source_center_alpha,2))
 
     print 'STEP 2: 1D Gaussian fit'
 
     # Fit Gaussian distribution to along-slice signal profile
-    sign_amp,alpha_centers,alpha_fwhms = [np.full((len(lambcens)),np.nan) for j in range(3)]
+    sign_amp,alpha_centers,alpha_fwhms,bkg_signal = [np.full((len(lambcens)),np.nan) for j in range(4)]
     failed_fits = []
     for ibin in xrange(len(lambcens)):
         coords = np.where((sliceMap == 100*int(band[0])+source_center_slice) & (np.abs(lambdaMap-lambcens[ibin])<=lambfwhms[ibin]/2.) & (~np.isnan(sci_img)))
@@ -287,6 +409,7 @@ def point_source_centroiding(sci_img,band,d2cMaps,spec_grid=None,fit='2D'):
         sign_amp[ibin]      = popt[0]+popt[3]
         alpha_centers[ibin] = popt[1]
         alpha_fwhms[ibin]   = 2.355*np.abs(popt[2])
+        bkg_signal[ibin]    = popt[3]
 
     # omit outliers
     for i in xrange(len(np.diff(sign_amp))):
@@ -321,11 +444,11 @@ def point_source_centroiding(sci_img,band,d2cMaps,spec_grid=None,fit='2D'):
 
     if fit == '1D':
         sigma_alpha, sigma_beta = alpha_fwhms/2.355, beta_fwhms/2.355
-        return sign_amp,alpha_centers,beta_centers,sigma_alpha, sigma_beta
+        return sign_amp,alpha_centers,beta_centers,sigma_alpha,sigma_beta,bkg_signal
 
     elif fit == '2D':
         print 'STEP 3: 2D Gaussian fit'
-        sign_amp2D,alpha_centers2D,beta_centers2D,sigma_alpha2D,sigma_beta2D = [np.full((len(lambcens)),np.nan) for j in range(5)]
+        sign_amp2D,alpha_centers2D,beta_centers2D,sigma_alpha2D,sigma_beta2D,bkg_amp2D = [np.full((len(lambcens)),np.nan) for j in range(6)]
         failed_fits = []
 
         for ibin in range(len(lambcens)):
@@ -350,11 +473,12 @@ def point_source_centroiding(sci_img,band,d2cMaps,spec_grid=None,fit='2D'):
             beta_centers2D[ibin]  = popt[2]
             sigma_alpha2D[ibin]   = popt[3]
             sigma_beta2D[ibin]    = popt[4]
+            bkg_amp2D[ibin]       = popt[5]
 
         print 'The following bins failed to converge:'
         print failed_fits
 
-        return sign_amp2D,alpha_centers2D,beta_centers2D,sigma_alpha2D,sigma_beta2D
+        return sign_amp2D,alpha_centers2D,beta_centers2D,sigma_alpha2D,sigma_beta2D,bkg_amp2D
 
 def point_source_along_slice_centroiding(sci_img,band,d2cMaps,spec_grid=None,offset_slice=0,campaign=None,verbose=False):
     # same as "point_source_centroiding" function, however only performs 1D Gaussian fitting, in along-slice (alpha) direction
@@ -486,13 +610,28 @@ def get_pixel_area_in_alphalambda(band=None,d2cMaps=None):
 
     return pixsiz_alphalambda
 
-
-def aperture_photometry(band=None,sci_img=None,apertureMask=None,aperture_area=None,d2cMaps=None,spec_grid=None,img_type='sci'):
+def standard_photometry_point_source(sci_img,d2cMaps,spec_grid=None):
     lambdaMap = d2cMaps['lambdaMap']
     lambcens,lambfwhms = spec_grid[0],spec_grid[1]
 
-    pixsiz_img = get_pixel_spatial_area(band=band,d2cMaps=d2cMaps) # [arcsec*arcsec]
-    pixelsiz_alphalambdaMap = get_pixel_area_in_alphalambda(band=band,d2cMaps=d2cMaps) # [arcsec*micron]
+    signals_standard = np.zeros(len(lambcens))
+    for ibin in range(len(lambcens)):
+        # map containing only pixels within one spectral bin, omitting NaNs
+        pixelsInBinNoNaN = np.where((np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.) & (np.isnan(sci_img)==False) )
+        # number of pixels in spectral bin and in aperture
+        nPixels = len(pixelsInBinNoNaN[0])
+        # map containing only pixels within one spectral bin
+        sci_img_masked = sci_img[pixelsInBinNoNaN]
+        # perform aperture photometry
+        signals_standard[ibin] = sci_img_masked.sum()/nPixels
+    return signals_standard
+
+def aperture_photometry_point_source(band,sci_img,apertureMask,aperture_area,d2cMaps,spec_grid=None,img_type='sci'):
+    lambdaMap = d2cMaps['lambdaMap']
+    lambcens,lambfwhms = spec_grid[0],spec_grid[1]
+
+    pixsiz_img = get_pixel_spatial_area(band,d2cMaps) # [arcsec*arcsec]
+    pixelsiz_alphalambdaMap = get_pixel_area_in_alphalambda(band,d2cMaps) # [arcsec*micron]
     pixvol_img = pixelsiz_alphalambdaMap*d2cMaps['bdel']
 
     signals_aper = np.zeros(len(lambcens))
@@ -508,8 +647,9 @@ def aperture_photometry(band=None,sci_img=None,apertureMask=None,aperture_area=N
 
         # perform aperture photometry
         if img_type=='sci':
-            signals_aper[ibin] = sci_img_masked.sum()/nPixels
-            #signals_aper[ibin] = ((sci_img_masked*pixsiz_img_masked).sum()/pixvol_img_masked.sum()) * aperture_area * lambfwhms[ibin]
+            signals_aper[ibin] = sci_img_masked.sum() #/nPixels
+            # signals_aper[ibin] = ((sci_img_masked.sum()/pixvol_img_masked.sum()) * aperture_area * lambfwhms[ibin])/nPixels
+            # print pixvol_img_masked.sum(), aperture_area * lambfwhms[ibin]
         elif img_type=='err':
             var_img = (sci_img_masked*pixsiz_img_masked)**2.
             signals_aper[ibin] = var_img.sum()/nPixels
@@ -525,23 +665,84 @@ def aperture_photometry(band=None,sci_img=None,apertureMask=None,aperture_area=N
 
     return signals_aper
 
-def optimal_extraction(band=None,sci_img=None,err_img=None,psf=None,spec_grid=None,d2cMaps=None):
+# def aperture_photometry_point_source(sci_img,pixsiz_img,apertureMask,d2cMaps,spec_grid=None,img_type='sci'):
+#     lambdaMap = d2cMaps['lambdaMap']
+#     lambcens,lambfwhms = spec_grid[0],spec_grid[1]
+#
+#     signals_aper = np.zeros(len(lambcens))
+#     if img_type == 'sci':
+#         # psf_copy = psf.copy()
+#         for ibin in range(len(lambcens)):
+#             # # map containing only pixels within one spectral bin, omitting NaNs
+#             # pixelsInBinNoNaN = np.where((np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.) & (np.isnan(psf)==False) )
+#             # # Normalize psf in bin so that the peak is at a value of 1.
+#             # psf_copy[pixelsInBinNoNaN] /= psf[pixelsInBinNoNaN].max()
+#
+#             # map containing only pixels within one spectral bin, within the defined aperture, omitting NaNs
+#             pixelsInBinInApertureNoNaN = np.where((np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.) & (apertureMask!=0.) & (np.isnan(sci_img)==False) )
+#             # number of pixels in spectral bin and in aperture
+#             nPixels = len(pixelsInBinInApertureNoNaN[0])
+#             # map containing only pixels within one spectral bin, within the defined aperture
+#             sci_img_masked = sci_img[pixelsInBinInApertureNoNaN]*pixsiz_img[pixelsInBinInApertureNoNaN] #/psf_copy[pixelsInBinInApertureNoNaN]
+#             # perform aperture photometry
+#             signals_aper[ibin] = sci_img_masked.sum()/pixsiz_img[pixelsInBinInApertureNoNaN].sum() # /psf_copy[pixelsInBinInApertureNoNaN].sum()
+#
+#     if img_type == 'psf':
+#         sci_img_copy = sci_img.copy()
+#         for ibin in range(len(lambcens)):
+#             # map containing only pixels within one spectral bin, omitting NaNs
+#             pixelsInBinNoNaN = np.where((np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.) & (np.isnan(sci_img_copy)==False) )
+#             # number of pixels in spectral bin
+#             nPixels = len(pixelsInBinNoNaN[0])
+#             # normalize the psf in a spectral bin by the total signal, normalized to the number of pixels in the spectral bin (not the same in all bins)
+#             sci_img_copy[pixelsInBinNoNaN] = sci_img_copy[pixelsInBinNoNaN]/nPixels/(sci_img_copy[pixelsInBinNoNaN]/nPixels).sum()
+#             # map containing only pixels within one spectral bin, within the defined aperture, omitting NaNs
+#             pixelsInBinInApertureNoNaN = np.where((np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.) & (apertureMask!=0.) & (np.isnan(sci_img_copy)==False) )
+#             # map containing only pixels within one spectral bin, within the defined aperture
+#             sci_img_masked = sci_img_copy[pixelsInBinInApertureNoNaN]
+#             # perform aperture photometry
+#             signals_aper[ibin] = sci_img_masked.sum()
+#     return signals_aper
+
+def aperture_photometry_extended_source(sci_img,apertureMask,aperture_area,d2cMaps=None,spec_grid=None):
     lambdaMap = d2cMaps['lambdaMap']
     lambcens,lambfwhms = spec_grid[0],spec_grid[1]
-    pixsiz_img = get_pixel_spatial_area(band=band,d2cMaps=d2cMaps)
-    var_img    = (err_img*pixsiz_img)**2.
+
+    signals_aper = np.zeros(len(lambcens))
+    for ibin in range(len(lambcens)):
+        # map containing only pixels within one spectral bin, within the defined aperture, omitting NaNs
+        pixelsInBinInApertureNoNaN = np.where((np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.) & (apertureMask!=0.) & (np.isnan(sci_img)==False) )
+        # number of pixels in spectral bin and in aperture
+        nPixels = len(pixelsInBinInApertureNoNaN[0])
+
+        # map containing only pixels within one spectral bin, within the defined aperture
+        sci_img_masked    = sci_img[pixelsInBinInApertureNoNaN]
+
+        # perform aperture photometry
+        signals_aper[ibin] = (sci_img_masked.sum()/nPixels) * aperture_area
+    return signals_aper
+
+def optimal_extraction(band,sci_img,err_img,psf,d2cMaps,spec_grid=None):
+    lambdaMap = d2cMaps['lambdaMap']
+    lambcens,lambfwhms = spec_grid[0],spec_grid[1]
+    var_img    = err_img**2.
+    psf_copy   = psf.copy()
 
     signals_opex,signals_error_opex = np.zeros(len(lambcens)),np.zeros(len(lambcens))
     for ibin in range(len(lambcens)):
-        # enforce normalization of psf in every wavelength bin
-        psf[np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.] = psf[np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.]/psf[np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.].sum()
-
         # map containing only pixels within one spectral bin
         pixelsInBinNoNaN = np.where((np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.) & (np.isnan(sci_img)==False) & (np.isnan(var_img)==False) )
-        weights = (psf[pixelsInBinNoNaN] / var_img[pixelsInBinNoNaN]) / (psf[pixelsInBinNoNaN]**2./var_img[pixelsInBinNoNaN]).sum()
+        # number of pixels in spectral bin and in aperture
+        nPixels = len(pixelsInBinNoNaN[0])
 
-        signals_opex[ibin] = (weights*sci_img[pixelsInBinNoNaN]*pixsiz_img[pixelsInBinNoNaN]).sum()
-        signals_error_opex[ibin] = np.sqrt( ( weights**2. * var_img[pixelsInBinNoNaN] ).sum() )
+        # enforce normalization of psf in every wavelength bin
+        psf_copy[pixelsInBinNoNaN] = psf_copy[pixelsInBinNoNaN]/psf_copy[pixelsInBinNoNaN].sum()
+
+        # compute weights
+        weights = psf_copy[pixelsInBinNoNaN]**2./var_img[pixelsInBinNoNaN]
+
+        signals_opex[ibin] = ( ( weights*sci_img[pixelsInBinNoNaN]/psf_copy[pixelsInBinNoNaN] ).sum()/weights.sum() )
+        signals_error_opex[ibin] = np.sqrt( 1/weights.sum() )
 
     return signals_opex,signals_error_opex
 
@@ -591,10 +792,14 @@ def rectangular_aperture(center=[0,0],width=1.,height=1.,d2cMaps=None):
 
     return pixels_inside_rectangle,rectangular_aperture_area
 
-def evaluate_psf_cdp(psffits=None,source_center=[0,0],d2cMaps=None):
+def evaluate_psf_cdp(psffits,d2cMaps,source_center=[0,0]):
     # PSF CDP is provided as a spectral cube
     #>get values
     psf_values = psffits[1].data.transpose(2,1,0) # flip data from Z,Y,X to X,Y,Z
+
+    # #>normalize values
+    # for layer in range(psf_values.shape[2]):
+    #     psf_values[:,:,layer] /= psf_values[:,:,layer].sum()
 
     #>get grid
     NAXIS1,NAXIS2,NAXIS3 = psf_values.shape
@@ -732,6 +937,7 @@ def reflectivity_from_continuum(y):
 
 #--2d
 def gauss2d(xy, amp, x0, y0, sigma_x, sigma_y, base):
+    amp, x0, y0, sigma_x, sigma_y, base = float(amp),float(x0),float(y0),float(sigma_x),float(sigma_y),float(base)
     x, y = xy
     a = 1/(2*sigma_x**2)
     b = 1/(2*sigma_y**2)
@@ -1220,7 +1426,7 @@ def slice_alphapositions(band,d2cMaps,sliceID=None):
 
 
 # plot
-def plot_point_source_centroiding(band=None,sci_img=None,d2cMaps=None,spec_grid=None,centroid=None,ibin=None,data=None):
+def plot_point_source_centroiding(band,sci_img,d2cMaps,spec_grid=None,centroid=None,ibin=None,data=None):
     import mrs_aux as maux
     # distortion maps
     sliceMap  = d2cMaps['sliceMap']
@@ -1232,7 +1438,7 @@ def plot_point_source_centroiding(band=None,sci_img=None,d2cMaps=None,spec_grid=
     unique_betas = np.sort(np.unique(betaMap[(sliceMap>100*int(band[0])) & (sliceMap<100*(int(band[0])+1))]))
     fov_lims  = [alphaMap[np.nonzero(lambdaMap)].min(),alphaMap[np.nonzero(lambdaMap)].max()]
     lambcens,lambfwhms = spec_grid[0],spec_grid[1]
-    sign_amp,alpha_centers,beta_centers,sigma_alpha,sigma_beta = centroid[0],centroid[1],centroid[2],centroid[3],centroid[4]
+    sign_amp,alpha_centers,beta_centers,sigma_alpha,sigma_beta,sign_bkg = centroid
 
     # across-slice center:
     sum_signals = np.zeros(nslices)
@@ -1263,9 +1469,10 @@ def plot_point_source_centroiding(band=None,sci_img=None,d2cMaps=None,spec_grid=
     axs[0].vlines([alpha_centers[ibin]-3*sigma_alpha[ibin].max(),alpha_centers[ibin]+3*sigma_alpha[ibin].max()],testy.min(),testy.max(),label=r'3$\sigma$ lines')
     axs[0].set_xlim(fov_lims[0],fov_lims[1])
     axs[0].tick_params(axis='both',labelsize=20)
-    axs[0].set_xlabel(r'along-slice direction $\alpha$ [arcsec]',fontsize=20)
+    axs[0].set_xlabel(r'Along-slice direction $\alpha$ [arcsec]',fontsize=20)
     if data == 'slope': axs[0].set_ylabel('Signal [DN/sec]',fontsize=20)
-    elif data == 'surfbright': axs[0].set_ylabel('Signal [mJy/arcsec^2]',fontsize=20)
+    elif data == 'divphotom': axs[0].set_ylabel('Signal [mJy/pix]',fontsize=20)
+    elif data == 'surfbright': axs[0].set_ylabel(r'Signal [mJy/arcsec$^2$]',fontsize=20)
     axs[0].legend(loc='best',fontsize=14)
 
     # across-slice source centroiding
@@ -1282,9 +1489,10 @@ def plot_point_source_centroiding(band=None,sci_img=None,d2cMaps=None,spec_grid=
     axs[1].plot(testx,gauss1d_wBaseline(testx,popt[0],popt[1],0.31*(lambcens[ibin]/8.)/2.355,popt[3]),alpha=0.4,label='diffraction-limited PSF')
     axs[1].vlines([beta_centers[ibin]-3*sigma_beta[ibin].max(),beta_centers[ibin]+3*sigma_beta[ibin].max()],testy.min(),testy.max(),label=r'3$\sigma$ lines')
     axs[1].tick_params(axis='both',labelsize=20)
-    axs[1].set_xlabel(r'across-slice direction $\beta$ [arcsec]',fontsize=20)
+    axs[1].set_xlabel(r'Across-slice direction $\beta$ [arcsec]',fontsize=20)
     if data == 'slope': axs[1].set_ylabel('Signal [DN/sec]',fontsize=20)
-    elif data == 'surfbright': axs[1].set_ylabel('Signal [mJy/arcsec^2]',fontsize=20)
+    elif data == 'divphotom': axs[1].set_ylabel('Signal [mJy/pix]',fontsize=20)
+    elif data == 'surfbright': axs[1].set_ylabel(r'Signal [mJy/arcsec$^2$]',fontsize=20)
     axs[1].legend(loc='best',fontsize=14)
     plt.suptitle('1D Gaussian Fitting',fontsize=20)
     plt.tight_layout(rect=[0, 0.03, 1, 0.96])
@@ -1316,9 +1524,10 @@ def plot_point_source_centroiding(band=None,sci_img=None,d2cMaps=None,spec_grid=
     cbar = fig.colorbar(im)
     cbar.ax.tick_params(labelsize=14)
     if data == 'slope': cbar.set_label(r'Signal [DN/sec]', labelpad=30,rotation=270,fontsize=16)
-    elif data == 'surfbright': cbar.set_label(r'Signal [mJy/arcsec^2]', labelpad=30,rotation=270,fontsize=16)
-    plt.xlabel(r'Along-slice direction (alpha) [arcsec]',fontsize=16)
-    plt.ylabel(r'Across-slice direction (beta) [arcsec]',fontsize=16)
+    elif data == 'divphotom': cbar.set_label(r'Signal [mJy/pix]', labelpad=30,rotation=270,fontsize=16)
+    elif data == 'surfbright': cbar.set_label(r'Signal [mJy/arcsec$^2$]', labelpad=30,rotation=270,fontsize=16)
+    plt.xlabel(r'Along-slice direction $\alpha$ [arcsec]',fontsize=16)
+    plt.ylabel(r'Across-slice direction $\beta$ [arcsec]',fontsize=16)
     plt.tick_params(axis='both',labelsize=20)
     ax.invert_yaxis()
     plt.suptitle('2D Gaussian Fitting',fontsize=20)
@@ -1334,11 +1543,12 @@ def plot_point_source_centroiding(band=None,sci_img=None,d2cMaps=None,spec_grid=
     ax.set_xlim(fov_lims[0],fov_lims[1])
     ax.set_ylim(unique_betas.min(),unique_betas.max())
     ax.set_zlim(0)
-    ax.set_xlabel('Along-slice direction [arcsec]',fontsize=16)
-    ax.set_ylabel('Across-slice direction [arcsec]',fontsize=16)
+    ax.set_xlabel(r'Along-slice direction $\alpha$ [arcsec]',fontsize=16)
+    ax.set_ylabel(r'Across-slice direction $\beta$ [arcsec]',fontsize=16)
     if data == 'slope': ax.set_zlabel('Signal [DN/sec]',fontsize=16)
-    if data == 'surfbright': ax.set_zlabel('Signal [mJy/arcsec^2]',fontsize=16)
-    ax.text2D(0.15, 0.85, str(round(lambcens[ibin],2))+'um', transform=ax.transAxes,fontsize=20)
+    elif data == 'divphotom': ax.set_zlabel(r'Signal [mJy/pix]',fontsize=16)
+    if data == 'surfbright': ax.set_zlabel(r'Signal [mJy/arcsec$^2$]',fontsize=16)
+    ax.text2D(0.14, 0.85, r'$\lambda =$'+str(round(lambcens[ibin],2))+'um', transform=ax.transAxes,fontsize=20)
     ax.tick_params(axis='both',labelsize=10)
     plt.suptitle('Wireframe plot',fontsize=20)
     plt.tight_layout(rect=[0, 0.03, 1, 0.98])
@@ -1428,7 +1638,7 @@ def indexOfRefractionAl(wav):
     except TypeError:
         n,k = interp_n(wav),interp_k(wav)
 
-    return n # +k*1j
+    return n +k*1j
 
 def indexOfRefractionTransCont(wav):
     # Index of refraction of transparent contact
