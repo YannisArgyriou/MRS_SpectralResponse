@@ -8,3 +8,4 @@ Notebooks:
 3 - MRS cross-dichroic response derivation from internal calibration source measurements  
 4 - MRS cross-dichroic PHOTOM  
 5 - Save cross-dichroic response to CDP  
+6 - Plot cross-dichroic response CDP response  

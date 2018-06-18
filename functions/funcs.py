@@ -665,44 +665,24 @@ def aperture_photometry_point_source(band,sci_img,apertureMask,aperture_area,d2c
 
     return signals_aper
 
-# def aperture_photometry_point_source(sci_img,pixsiz_img,apertureMask,d2cMaps,spec_grid=None,img_type='sci'):
-#     lambdaMap = d2cMaps['lambdaMap']
-#     lambcens,lambfwhms = spec_grid[0],spec_grid[1]
-#
-#     signals_aper = np.zeros(len(lambcens))
-#     if img_type == 'sci':
-#         # psf_copy = psf.copy()
-#         for ibin in range(len(lambcens)):
-#             # # map containing only pixels within one spectral bin, omitting NaNs
-#             # pixelsInBinNoNaN = np.where((np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.) & (np.isnan(psf)==False) )
-#             # # Normalize psf in bin so that the peak is at a value of 1.
-#             # psf_copy[pixelsInBinNoNaN] /= psf[pixelsInBinNoNaN].max()
-#
-#             # map containing only pixels within one spectral bin, within the defined aperture, omitting NaNs
-#             pixelsInBinInApertureNoNaN = np.where((np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.) & (apertureMask!=0.) & (np.isnan(sci_img)==False) )
-#             # number of pixels in spectral bin and in aperture
-#             nPixels = len(pixelsInBinInApertureNoNaN[0])
-#             # map containing only pixels within one spectral bin, within the defined aperture
-#             sci_img_masked = sci_img[pixelsInBinInApertureNoNaN]*pixsiz_img[pixelsInBinInApertureNoNaN] #/psf_copy[pixelsInBinInApertureNoNaN]
-#             # perform aperture photometry
-#             signals_aper[ibin] = sci_img_masked.sum()/pixsiz_img[pixelsInBinInApertureNoNaN].sum() # /psf_copy[pixelsInBinInApertureNoNaN].sum()
-#
-#     if img_type == 'psf':
-#         sci_img_copy = sci_img.copy()
-#         for ibin in range(len(lambcens)):
-#             # map containing only pixels within one spectral bin, omitting NaNs
-#             pixelsInBinNoNaN = np.where((np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.) & (np.isnan(sci_img_copy)==False) )
-#             # number of pixels in spectral bin
-#             nPixels = len(pixelsInBinNoNaN[0])
-#             # normalize the psf in a spectral bin by the total signal, normalized to the number of pixels in the spectral bin (not the same in all bins)
-#             sci_img_copy[pixelsInBinNoNaN] = sci_img_copy[pixelsInBinNoNaN]/nPixels/(sci_img_copy[pixelsInBinNoNaN]/nPixels).sum()
-#             # map containing only pixels within one spectral bin, within the defined aperture, omitting NaNs
-#             pixelsInBinInApertureNoNaN = np.where((np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.) & (apertureMask!=0.) & (np.isnan(sci_img_copy)==False) )
-#             # map containing only pixels within one spectral bin, within the defined aperture
-#             sci_img_masked = sci_img_copy[pixelsInBinInApertureNoNaN]
-#             # perform aperture photometry
-#             signals_aper[ibin] = sci_img_masked.sum()
-#     return signals_aper
+def aperture_weighted_photometry_point_source(sci_img,weight_map,d2cMaps,spec_grid=None):
+    lambdaMap = d2cMaps['lambdaMap']
+    lambcens,lambfwhms = spec_grid[0],spec_grid[1]
+
+    copy_sci_img = sci_img.copy()
+    copy_sci_img[np.isnan(copy_sci_img)] = 0
+
+    signals_aper = np.zeros(len(lambcens))
+    for ibin in range(len(lambcens)):
+        # map containing only pixels within one spectral bin, within the defined aperture, omitting NaNs
+        pixelsInBinInApertureNoNaN = np.where(np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.)
+
+        # map containing only pixels within one spectral bin, within the defined aperture
+        sci_img_masked    = copy_sci_img[pixelsInBin]*weight_map[pixelsInBin]
+
+        # perform aperture photometry
+        signals_aper[ibin] = sci_img_masked.sum()
+    return signals_aper
 
 def aperture_photometry_extended_source(sci_img,apertureMask,aperture_area,d2cMaps=None,spec_grid=None):
     lambdaMap = d2cMaps['lambdaMap']
@@ -720,6 +700,56 @@ def aperture_photometry_extended_source(sci_img,apertureMask,aperture_area,d2cMa
 
         # perform aperture photometry
         signals_aper[ibin] = (sci_img_masked.sum()/nPixels) * aperture_area
+    return signals_aper
+
+def pixel_signal_contribution(d2cMaps,aperture,spec_grid=None):
+    from shapely.geometry import Polygon
+    print 'Pixel weight mapping'
+    lambcens,lambfwhms = spec_grid[0],spec_grid[1]
+    weight_map = np.zeros((1024,1032))
+    for ibin in range(len(lambcens)):
+        if ibin%100 == 0: print '{}/{} bins processed'.format(ibin,len(lambcens))
+        i,j = np.where(np.abs(d2cMaps['lambdaMap']-lambcens[ibin])<lambfwhms[ibin]/2.)
+        for pix in range(len(i)):
+            alphaUR = d2cMaps['alphaURMap'][i[pix],j[pix]]
+            alphaUL = d2cMaps['alphaULMap'][i[pix],j[pix]]
+            alphaLL = d2cMaps['alphaLLMap'][i[pix],j[pix]]
+            alphaLR = d2cMaps['alphaLRMap'][i[pix],j[pix]]
+
+            betaUR = d2cMaps['betaURMap'][i[pix],j[pix]]
+            betaUL = d2cMaps['betaULMap'][i[pix],j[pix]]
+            betaLL = d2cMaps['betaLLMap'][i[pix],j[pix]]
+            betaLR = d2cMaps['betaLRMap'][i[pix],j[pix]]
+
+            alphabetaUR = [alphaUR,betaUR]
+            alphabetaUL = [alphaUL,betaUL]
+            alphabetaLL = [alphaLL,betaLL]
+            alphabetaLR = [alphaLR,betaLR]
+
+            xy = [alphabetaUR, alphabetaUL, alphabetaLL, alphabetaLR]
+            polygon_shape = Polygon(xy)
+
+            weight_map[i[pix],j[pix]] = polygon_shape.intersection(aperture).area/polygon_shape.area
+    print '{}/{} bins processed'.format(len(lambcens),len(lambcens))
+    return weight_map
+
+def aperture_weighted_photometry_extended_source(sci_img,weight_map,aperture_area,d2cMaps=None,spec_grid=None):
+    lambdaMap = d2cMaps['lambdaMap']
+    lambcens,lambfwhms = spec_grid[0],spec_grid[1]
+
+    copy_sci_img = sci_img.copy()
+    copy_sci_img[np.isnan(copy_sci_img)] = 0
+
+    signals_aper = np.zeros(len(lambcens))
+    for ibin in range(len(lambcens)):
+        # map containing only pixels within one spectral bin, within the defined aperture, omitting NaNs
+        pixelsInBin = np.where((np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.) )
+
+        # map containing only pixels within one spectral bin, within the defined aperture
+        sci_img_masked    = sci_img[pixelsInBin]*weight_map[pixelsInBin]
+
+        # perform aperture photometry
+        signals_aper[ibin] = (sci_img_masked.sum()/weight_map[pixelsInBin].sum()) * aperture_area
     return signals_aper
 
 def optimal_extraction(band,sci_img,err_img,psf,d2cMaps,spec_grid=None):
