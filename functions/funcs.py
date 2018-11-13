@@ -3,14 +3,61 @@
 # import python modules
 import os
 import pickle
+import itertools
 import numpy as np
+from scipy import arcsin
 import scipy.special as sp
 from scipy.optimize import curve_fit
 import scipy.interpolate as scp_interpolate
 import matplotlib.pyplot as plt
 
 # Definition
-#-import cdps
+#--auxilliary data
+def mrs_aux(band):
+    allbands = ['1A','1B','1C','2A','2B','2C','3A','3B','3C','4A','4B','4C']
+    allchannels = ['1','2','3','4']
+    allsubchannels = ['A','B','C']
+
+    MRS_bands = {'1A':[4.83,5.82],
+        '1B':[5.62,6.73],
+        '1C':[6.46,7.76],
+        '2A':[7.44,8.90],
+        '2B':[8.61,10.28],
+        '2C':[9.94,11.87],
+        '3A':[11.47,13.67],
+        '3B':[13.25,15.80],
+        '3C':[15.30,18.24],
+        '4A':[17.54,21.10],
+        '4B':[20.44,24.72],
+        '4C':[23.84,28.82]} # microns
+
+    MRS_R = {'1A':[3320.,3710.],
+        '1B':[3190.,3750.],
+        '1C':[3100.,3610.],
+        '2A':[2990.,3110.],
+        '2B':[2750.,3170.],
+        '2C':[2860.,3300.],
+        '3A':[2530.,2880.],
+        '3B':[1790.,2640.],
+        '3C':[1980.,2790.],
+        '4A':[1460.,1930.],
+        '4B':[1680.,1770.],
+        '4C':[1630.,1330.]} # R = lambda / delta_lambda
+
+    MRS_nslices = {'1':21,'2':17,'3':16,'4':12} # number of slices
+
+    MRS_alphapix = {'1':0.196,'2':0.196,'3':0.245,'4':0.273} # arcseconds
+
+    MRS_slice = {'1':0.176,'2':0.277,'3':0.387,'4':0.645} # arcseconds
+
+    MRS_FOV = {'1':[3.70,3.70],'2':[4.51,4.71],'3':[6.13,6.19],
+               '4':[7.74,7.74]} # arcseconds along and across slices
+
+    MRS_FWHM = {'1':2.16*MRS_alphapix['1'],'2':3.30*MRS_alphapix['2'],
+                '3':4.04*MRS_alphapix['3'],'4':5.56*MRS_alphapix['4']} # MRS PSF
+    return allbands,allchannels,allsubchannels,MRS_bands[band],MRS_R[band],MRS_alphapix[band[0]],MRS_slice[band[0]],MRS_FOV[band[0]],MRS_FWHM[band[0]]
+
+#--import cdps
 def get_cdps(band,cdpDir,output='img'):
     """Returns fringe, photom, psf, and resolution CDP fits files """
     subchan_names = {'A':'SHORT','B':'MEDIUM','C':'LONG'}
@@ -40,8 +87,13 @@ def get_cdps(band,cdpDir,output='img'):
     resol_file = os.path.join(cdpDir,\
       'MIRI_FM_%s_%s_RESOL_7B.00.00.fits' % (detnick,resol_subchan_name))
 
+    # photon-conversion efficiency (PCE)
+    pce_subchan_name = band[0]+subchan_names[band[1]]
+    pce_file = os.path.join(cdpDir,\
+      'MIRI_FM_%s_%s_PCE_06.00.00.fits' % (detnick,pce_subchan_name))
+
     if output == 'filepath':
-        return fringe_file,photom_file,psf_file,resol_file
+        return fringe_file,photom_file,psf_file,resol_file,pce_file
     elif output == 'img':
         from astropy.io import fits
         fringe_img     = fits.open(fringe_file)[1].data        # [unitless]
@@ -49,9 +101,15 @@ def get_cdps(band,cdpDir,output='img'):
         pixsiz_img     = fits.open(photom_file)[5].data        # [arcsec^2/pix]
         psffits        = fits.open(psf_file)                   # [unitless]
         specres_table  = fits.open(resol_file)[1].data         # [unitless]
-        return fringe_img,photom_img,pixsiz_img,psffits,specres_table
+        pce_table      = fits.open(pce_file)[1].data
+        return fringe_img,photom_img,pixsiz_img,psffits,specres_table,pce_table
+    elif output == 'img_error':
+        from astropy.io import fits
+        fringe_img_error = fits.open(fringe_file)[2].data        # [unitless]
+        photom_img_error = fits.open(photom_file)[2].data        # [DN/s * pixel/mJy]
+        return fringe_img_error,photom_img_error
 
-# import MIRIM PSFs
+#--import MIRIM PSFs
 def mirimpsfs(workDir=None):
     import glob
     # CV2 PSF measurements
@@ -91,7 +149,7 @@ def mirimpsfs(workDir=None):
 
     return MIRIMPSF_dictionary
 
-#-corrections
+#--corrections
 def OddEvenRowSignalCorrection(sci_img,nRows=1024):
     copy_img = sci_img.copy()
     for nRow in range(nRows-2):
@@ -111,7 +169,7 @@ def Shepard2DKernel(R, k):
     w[d==0]=0
     return w
 
-def straylightCorrection(sci_img,sliceMap,R=50, k=1):
+def straylightCorrection(sci_img,sliceMap,R=50, k=1, output='source'):
     from astropy.convolution import convolve, Box2DKernel
     """
     Applies a modified version of the Shepard algorithm to remove straylight from the MIRI MRS detector
@@ -128,7 +186,7 @@ def straylightCorrection(sci_img,sliceMap,R=50, k=1):
     img_gap = sci_img*mask
 
     # img_gap[img_gap>0.02*np.max(sci_img[sliceMap>0])] = 0 # avoid cosmic rays contaminating result
-    # img_gap[img_gap<0] = 0 # set pixels less than zero to 0
+    img_gap[img_gap<0] = 0 # set pixels less than zero to 0
     img_gap = convolve(img_gap, Box2DKernel(3)) # smooth gap pixels with Boxkernel
     img_gap*=mask # reset sci pixels to 0
     # convolve gap pixel img with weight kernel
@@ -138,7 +196,10 @@ def straylightCorrection(sci_img,sliceMap,R=50, k=1):
     astropy_conv /= norm_conv
     # reinstate gap pixels to previous values
     #astropy_conv[sliceMap==0] = img_gap[sliceMap==0]
-    return sci_img-astropy_conv
+    if output=='source':
+        return sci_img-astropy_conv
+    elif output=='straylight':
+        return astropy_conv
 
 def straylightManga(band,sci_img,err_img,sliceMap,det_dims=(1024,1032)):
     from scipy.interpolate import splrep,BSpline
@@ -261,7 +322,7 @@ def straylightManga(band,sci_img,err_img,sliceMap,det_dims=(1024,1032)):
 
     return sci_img - scatmodel_pass2
 
-#-compute
+#--compute
 def getSpecR(lamb0=None,band=None,specres_table=None):
     """Return spectral resolution (a.k.a. resolving power)"""
     res_select = 'res_avg'
@@ -281,9 +342,32 @@ def getSpecR(lamb0=None,band=None,specres_table=None):
 
 def getSpecR_linearR(lamb0=None,band=None):
     """Return spectral resolution (a.k.a. resolving power) assuming a linear relation to wavelength"""
-    import mrs_aux as maux
-    bandlims = maux.MRS_bands[band]
-    Rlims = maux.MRS_R[band]
+    MRS_bands = {'1A':[4.83,5.82],
+        '1B':[5.62,6.73],
+        '1C':[6.46,7.76],
+        '2A':[7.44,8.90],
+        '2B':[8.61,10.28],
+        '2C':[9.94,11.87],
+        '3A':[11.47,13.67],
+        '3B':[13.25,15.80],
+        '3C':[15.30,18.24],
+        '4A':[17.54,21.10],
+        '4B':[20.44,24.72],
+        '4C':[23.84,28.82]} # microns
+    MRS_R = {'1A':[3320.,3710.],
+        '1B':[3190.,3750.],
+        '1C':[3100.,3610.],
+        '2A':[2990.,3110.],
+        '2B':[2750.,3170.],
+        '2C':[2860.,3300.],
+        '3A':[2530.,2880.],
+        '3B':[1790.,2640.],
+        '3C':[1980.,2790.],
+        '4A':[1460.,1930.],
+        '4B':[1680.,1770.],
+        '4C':[1630.,1330.]} # R = lambda / delta_lambda
+    bandlims = MRS_bands[band]
+    Rlims = MRS_R[band]
     specR = (Rlims[1]-Rlims[0])/(bandlims[1]-bandlims[0]) * (lamb0-bandlims[0]) + Rlims[0]
     return specR
 
@@ -360,14 +444,16 @@ def spectral_gridding_linearR(band=None,d2cMaps=None,oversampling = 1.):
     return np.array(lambcens),np.array(lambfwhms)
 
 def point_source_centroiding(band,sci_img,d2cMaps,spec_grid=None,fit='2D',center=None):
-    import mrs_aux as maux
     # distortion maps
     sliceMap  = d2cMaps['sliceMap']
     lambdaMap = d2cMaps['lambdaMap']
     alphaMap  = d2cMaps['alphaMap']
     betaMap   = d2cMaps['betaMap']
     nslices   = d2cMaps['nslices']
-    mrs_fwhm  = maux.MRS_FWHM[band[0]]
+    MRS_alphapix = {'1':0.196,'2':0.196,'3':0.245,'4':0.273} # arcseconds
+    MRS_FWHM = {'1':2.16*MRS_alphapix['1'],'2':3.30*MRS_alphapix['2'],
+                '3':4.04*MRS_alphapix['3'],'4':5.56*MRS_alphapix['4']} # MRS PSF
+    mrs_fwhm  = MRS_FWHM[band[0]]
     lambcens,lambfwhms = spec_grid[0],spec_grid[1]
     unique_betas = np.sort(np.unique(betaMap[(sliceMap>100*int(band[0])) & (sliceMap<100*(int(band[0])+1))]))
     fov_lims  = [alphaMap[np.nonzero(lambdaMap)].min(),alphaMap[np.nonzero(lambdaMap)].max()]
@@ -387,9 +473,11 @@ def point_source_centroiding(band,sci_img,d2cMaps,spec_grid=None,fit='2D',center
         sel = (sliceMap == 100*int(band[0])+source_center_slice)
         img[sel]  = sci_img[sel]
 
-        first_nonzero_row = 0
-        while all(img[first_nonzero_row,:][~np.isnan(img[first_nonzero_row,:])] == 0.): first_nonzero_row+=1
-        source_center_alpha = alphaMap[first_nonzero_row,img[first_nonzero_row,:].argmax()]
+        source_center_alphas = []
+        for row in range(det_dims[0]):
+            source_center_alphas.append(alphaMap[row,img[row,:].argmax()])
+        source_center_alphas = np.array(source_center_alphas)
+        source_center_alpha  = np.average(source_center_alphas[~np.isnan(source_center_alphas)])
     else:
         source_center_slice,source_center_alpha = center[0],center[1]
     # summary:
@@ -480,17 +568,17 @@ def point_source_centroiding(band,sci_img,d2cMaps,spec_grid=None,fit='2D',center
 
         return sign_amp2D,alpha_centers2D,beta_centers2D,sigma_alpha2D,sigma_beta2D,bkg_amp2D
 
-def point_source_along_slice_centroiding(sci_img,band,d2cMaps,spec_grid=None,offset_slice=0,campaign=None,verbose=False):
+def point_source_along_slice_centroiding(band,sci_img,d2cMaps,spec_grid=None,offset_slice=0,campaign=None):
     # same as "point_source_centroiding" function, however only performs 1D Gaussian fitting, in along-slice (alpha) direction
     # param. "offset slice" allows to perform the centroiding analysis in a neighboring slice
-    import mrs_aux as maux
     # distortion maps
     sliceMap  = d2cMaps['sliceMap']
     lambdaMap = d2cMaps['lambdaMap']
     alphaMap  = d2cMaps['alphaMap']
     betaMap   = d2cMaps['betaMap']
-    nslices   = maux.MRS_nslices[band[0]]
-    mrs_fwhm  = maux.MRS_FWHM[band[0]]
+    nslices   = d2cMaps['nslices']
+
+    mrs_fwhm  = mrs_aux(band)[8]
     lambcens,lambfwhms = spec_grid[0],spec_grid[1]
     unique_betas = np.sort(np.unique(betaMap[(sliceMap>100*int(band[0])) & (sliceMap<100*(int(band[0])+1))]))
     fov_lims  = [alphaMap[np.nonzero(lambdaMap)].min(),alphaMap[np.nonzero(lambdaMap)].max()]
@@ -503,8 +591,7 @@ def point_source_along_slice_centroiding(sci_img,band,d2cMaps,spec_grid=None,off
     source_center_slice = np.argmax(sum_signals)+1
     source_center_slice+=offset_slice
 
-    if verbose==True:
-        print 'Slice {} has the largest summed flux'.format(source_center_slice)
+    print 'Slice {} has the largest summed flux'.format(source_center_slice)
 
     # along-slice center:
     det_dims = (1024,1032)
@@ -531,6 +618,9 @@ def point_source_along_slice_centroiding(sci_img,band,d2cMaps,spec_grid=None,off
         alpha_sigmas[ibin]  = np.abs(popt[2])
         bkg_amps[ibin]      = popt[3]
 
+    print 'The following bins failed to converge:'
+    print failed_fits
+
     # omit outliers
     for i in xrange(len(np.diff(sign_amps))):
         if np.abs(np.diff(alpha_centers)[i]) > 0.05:
@@ -540,9 +630,9 @@ def point_source_along_slice_centroiding(sci_img,band,d2cMaps,spec_grid=None,off
             if np.abs(np.diff(sign_amps)[i]) > 10.:
                 sign_amps[i],sign_amps[i+1],alpha_centers[i],alpha_centers[i+1],alpha_sigmas[i],alpha_sigmas[i+1],bkg_amps[i],bkg_amps[i+1] = [np.nan for j in range(8)]
 
-    return source_center_slice,sign_amps,alpha_centers,alpha_sigmas,bkg_amps
+    return sign_amps,alpha_centers,source_center_slice,alpha_sigmas,bkg_amps
 
-def get_pixel_spatial_area(band=None,d2cMaps=None):
+def get_pixel_spatial_area(band,d2cMaps):
     # Calculate size map
     # The spatial area of a pixel (assumed quadrilateral) is calculated as the sum of two triangles
     # The two trangles have side lengths A,B,C, and side C is shared (i.e. equal in both triangles)
@@ -675,7 +765,7 @@ def aperture_weighted_photometry_point_source(sci_img,weight_map,d2cMaps,spec_gr
     signals_aper = np.zeros(len(lambcens))
     for ibin in range(len(lambcens)):
         # map containing only pixels within one spectral bin, within the defined aperture, omitting NaNs
-        pixelsInBinInApertureNoNaN = np.where(np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.)
+        pixelsInBin = np.where(np.abs(lambdaMap-lambcens[ibin])<lambfwhms[ibin]/2.)
 
         # map containing only pixels within one spectral bin, within the defined aperture
         sci_img_masked    = copy_sci_img[pixelsInBin]*weight_map[pixelsInBin]
@@ -776,7 +866,93 @@ def optimal_extraction(band,sci_img,err_img,psf,d2cMaps,spec_grid=None):
 
     return signals_opex,signals_error_opex
 
-#-model
+#--degrade
+def convolvegauss(wavelength,flux,FWHM = None, mode = 'same'):
+    """
+    returns degraded flux plofile in accordance with the
+    input resolution defined through {FWHM} which is equal to
+    the mean wavelength of the wavelength range considered
+    divided by the resolution of the instrument
+
+    @ wavelength: numpy 1D array
+    @ flux: numpy 1D array
+    @ FWHM: numpy float
+    """
+
+    # make Gaussian kernel
+    width = FWHM/(2.0*np.sqrt(2.0*np.log(2.0))) # convert from FWHM to sigma
+
+    width_pix = width/(wavelength[1]-wavelength[0])
+
+    nker = 20*width_pix # the number of portions (20) making up the kernel is arbitrary...
+    # ..it just defines how far the wings of the kernel reach (since the value of the kernel
+    # there is expected to be small / close to zero, the kernel is limited to (20) pixel
+    # to the left and (20) pixels to the right from the defined center)
+    z = (np.arange(nker)- nker/2.)/width_pix
+    kernel = np.exp(-z**2/2.)
+
+    # for flux conservation
+    scale_factor = kernel.sum()
+
+    # convolve flux array with gaussian
+    result = 1./scale_factor * np.convolve(flux, kernel, mode = mode)
+
+    return result
+
+def convolvegauss_windt(x,y,sig):
+    """
+    NAME:
+          convolvegauss_windt
+    PURPOSE:
+        Convolve a function with a gaussian.
+    CALLING SEQUENCE:
+        Result=convolvegauss_windt(X,Y,SIG)
+    INPUTS:
+        X - vector of independent variables.
+        Y - vector of dependent variables.
+        SIG - width of gaussian, in same units as X.
+    KEYWORDS:
+          NSIGMA - A factor that determines how many points to use for
+                   the gaussian kernel. The exact number of points used
+                   depends on the value of SIG and the range of X values
+                   as well, but it will be roughly equal to 2*NSIGMA*SIG.
+                   Default=2.5.
+    PROCEDURE:
+          CONVOL is used to convolve y with a gaussian whose width is
+          sig, in x axis units.  The gaussian is defined as Gaussian =
+          1./sqrt(2.*pi*sigma)*exp(-0.5*(x/sigma)^2)
+    """
+    nsigma  = 2.5 # approximate width in units of sigma
+    nsigma2 = nsigma*2
+    n       = len(x)
+    conv    = (max(x)-min(x))/(n-1)    # conversion, units/point
+    n_pts  = np.ceil(nsigma2*sig/conv) # number of points
+    if (n_pts%2) == 0: n_pts += 1      # make odd number of points
+    xvar = (np.arange(n_pts)/(n_pts-1)-0.5)*n_pts # approx. - NSIGMA < x < +NSIGMA
+    gauss = np.exp(-.5*(xvar/(sig/conv))**2)         # gaussian of width sig.
+    scale_factor = gauss.sum() # impose flux conservation
+
+    # convolve y with gaussian kernel
+    result = 1./scale_factor * np.convolve(y, gauss, mode = 'same')
+
+    return result
+
+def degradefunc(wvl_range,wvl_arr,flux_arr,resolution):
+    flux_arrcopy = np.copy(flux_arr)
+
+    ind_wavlMin = find_nearest(wvl_arr,wvl_range[0])
+    ind_wavlMax = find_nearest(wvl_arr,wvl_range[1])
+    passband_centralWvl = (wvl_range[0]+wvl_range[1])/2.
+    if ind_wavlMin <= 3:
+        ind_wavlMin = 3
+    boundary_edge = 3 # add elements to convolution in order to get rid of boundary edge effects for mode 'same'
+
+    flux_arrcopy[ind_wavlMin-boundary_edge:ind_wavlMax+boundary_edge] = convolvegauss(wvl_arr[ind_wavlMin-boundary_edge:ind_wavlMax+boundary_edge],flux_arrcopy[ind_wavlMin-boundary_edge:ind_wavlMax+boundary_edge], FWHM = (passband_centralWvl/resolution))
+    flux_arr[ind_wavlMin:ind_wavlMax] = flux_arrcopy[ind_wavlMin:ind_wavlMax]
+
+    return flux_arr
+
+#--model
 def elliptical_aperture(center=[0,0],r=1.,q=1.,pa=0,d2cMaps=None):
     """
     Elliptical aperture, written by Ruyman Azzollini (DIAS, ruyman.azzollini@gmail.com), edited by Ioannis Argyriou (KUL, ioannis.argyriou@kuleuven.be)
@@ -893,8 +1069,8 @@ def evaluate_psf_cdp(psffits,d2cMaps,source_center=[0,0]):
 
     return psf
 
-#-fit
-#--1d
+#--fit
+# 1d
 def straight_line(x,a,b):
     return a*x+b
 
@@ -965,7 +1141,7 @@ def reflectivity_from_continuum(y):
     R2 = ((2. + 4./F) - np.sqrt(16./F + 16./F**2)) / 2.
     return F,R1,R2
 
-#--2d
+# 2d
 def gauss2d(xy, amp, x0, y0, sigma_x, sigma_y, base):
     amp, x0, y0, sigma_x, sigma_y, base = float(amp),float(x0),float(y0),float(sigma_x),float(sigma_y),float(base)
     x, y = xy
@@ -985,13 +1161,110 @@ def voight_profile2d(xy,amp,x0,y0,sigma_x,sigma_y,f):
     L_nu = (2*amp/(np.pi*(sigma_x+sigma_y)))/(1+4*inner)
     return f*L_nu + (1-f)*G_nu
 
-#--etalon lines
+def polyfit2d(x_s, x, y, z, order=3):
+    ncols = (order + 1)**2
+    G = np.zeros((x.size, ncols))
+    ij = itertools.product(range(order+1), range(order+1))
+    for k, (i,j) in enumerate(ij):
+        G[:,k] = (x-x_s)**j * y**i
+    m, _, _, _ = np.linalg.lstsq(G, z)
+    return m
+
+def convert_m_order2_to_order4(m):
+    m_new = np.array(list(m[:3])+[0,0]+list(m[3:6])+[0,0]+list(m[6:])+[0,0,0,0,0,0,0,0,0,0,0,0])
+    return m_new
+
+def polyval2d(x_s, x, y, m):
+    order = int(np.sqrt(len(m))) - 1
+    ij = itertools.product(range(order+1), range(order+1))
+    z = np.zeros_like(x)
+    for a, (i,j) in zip(m, ij):
+        z = z + a * (x-x_s)**j * y**i
+    return z
+
+
+# etalon lines
+def etalon_line_params(band):
+    if band == "1B":
+        alpha_high = 1.4
+        alpha_low = -1.5
+        thres_e1a=0.3
+        min_dist_e1a=5
+        sigma0_e1a = 1.5
+        thres_e1b=0.2
+        min_dist_e1b=6
+        sigma0_e1b = 10.
+    elif band == '1C':
+        alpha_high = 1.45
+        alpha_low = -1.5
+        thres_e1a=0.1
+        min_dist_e1a=9
+        sigma0_e1a=1.5
+        thres_e1b=0.2
+        min_dist_e1b=5
+        sigma0_e1b=1.7
+    elif band == '2A':
+        alpha_high = 2.2
+        alpha_low = -1.5
+        thres_e1a=0.3
+        min_dist_e1a=9
+        sigma0_e1a=1.8
+        thres_e1b=0.3
+        min_dist_e1b=9
+        sigma0_e1b=1.8
+    elif band == '2B':
+        alpha_high = 2.2
+        alpha_low = -1.5
+        thres_e1a=0.3
+        min_dist_e1a=9
+        sigma0_e1a=4.
+        thres_e1b=0.3
+        min_dist_e1b=9
+        sigma0_e1b=1.9
+    elif band == "2C":
+        alpha_high = 2.2
+        alpha_low = -1.5
+        thres_e1a=0.2
+        min_dist_e1a=12
+        sigma0_e1a=15.
+        thres_e1b=0.2
+        min_dist_e1b=9
+        sigma0_e1b=1.9
+
+    elif band == "4A":
+        alpha_high = 3.8
+        alpha_low = -2.8
+        thres_e2b=0.2
+        min_dist_e2b=18
+        sigma0_e2b=3.5
+
+    elif band == "4B":
+        alpha_high = 3.8
+        alpha_low = -2.8
+        thres_e2b=0.3
+        min_dist_e2b=25
+        sigma0_e2b=3.5
+
+    elif band == "4C":
+        alpha_high = 3.8
+        alpha_low = -2.8
+        thres_e2b=0.2
+        min_dist_e2b=32
+        sigma0_e2b=3.5
+
+    if band[0] in ['1','2']:
+        return alpha_high,alpha_low,thres_e1a,min_dist_e1a,sigma0_e1a,thres_e1b,min_dist_e1b,sigma0_e1b
+    elif band[0] in ['4']:
+        return alpha_high,alpha_low,thres_e2b,min_dist_e2b,sigma0_e2b
+
 def fit_etalon_lines(x,y,peaks,fit_func='skewed_voight',sigma0=3.5,f0=0.5,a0=0.1):
     # Available fitting functions: 'gauss1d','skewnorm_func','voight_profile','skewed_voight'
     xdata = x.copy()
     xdata[np.isnan(xdata)] = 0.
+    # xdata[np.isinf(xdata)] = 0.
     ydata = y.copy()
     ydata[np.isnan(ydata)] = 0.
+    # ydata[np.isinf(ydata)] = 0.
 
     bounds_gauss = ([0,0,0],[np.inf,np.inf,np.inf])
     bounds_skewnorm = ([0,0,0,-np.inf],[np.inf,np.inf,np.inf,np.inf])
@@ -1046,7 +1319,7 @@ def fit_etalon_lines(x,y,peaks,fit_func='skewed_voight',sigma0=3.5,f0=0.5,a0=0.1
                     except RuntimeError:
                         popt,pcov = curve_fit(gauss1d_woBaseline,xdata[0:peak_idx+N],ydata[0:peak_idx+N],p0=guess_gauss,absolute_sigma=True,bounds=bounds_gauss)
                         fitting_flag.append('gauss1d')
-        elif len(ydata)-peak_idx<N:
+        elif peak_idx+N >= len(ydata):
             range_ini[i] = xdata[peak_idx-N]
             range_fin[i] = xdata[-1]
             if fit_func == 'gauss1d':
@@ -1100,8 +1373,22 @@ def fit_etalon_lines(x,y,peaks,fit_func='skewed_voight',sigma0=3.5,f0=0.5,a0=0.1
                     popt,pcov = curve_fit(skewed_voight,xdata[peak_idx-N:peak_idx+N],ydata[peak_idx-N:peak_idx+N],p0=guess_skewvoight,absolute_sigma=True,bounds=bounds_skewvoight)
                     fitting_flag.append('skewed_voight')
                 except RuntimeError:
-                    popt,pcov = curve_fit(voight_profile,xdata[peak_idx-N:peak_idx+N],ydata[peak_idx-N:peak_idx+N],p0=guess_voight,absolute_sigma=True,bounds=bounds_voight)
-                    fitting_flag.append('voight_profile')
+                    try:
+                        popt,pcov = curve_fit(voight_profile,xdata[peak_idx-N:peak_idx+N],ydata[peak_idx-N:peak_idx+N],p0=guess_voight,absolute_sigma=True,bounds=bounds_voight)
+                        fitting_flag.append('voight_profile')
+                    except RuntimeError:
+                        popt = guess_gauss
+                        pcov = pcov
+                        fitting_flag.append('gauss1d')
+                except ValueError:
+                    try:
+                        sel = np.nonzero(ydata[peak_idx-N:peak_idx+N])
+                        popt,pcov = curve_fit(skewed_voight,xdata[peak_idx-N:peak_idx+N][sel],ydata[peak_idx-N:peak_idx+N][sel],p0=guess_skewvoight,absolute_sigma=True,bounds=bounds_skewvoight)
+                        fitting_flag.append('skewed_voight')
+                    except RuntimeError:
+                        popt = guess_gauss
+                        pcov = pcov
+                        fitting_flag.append('gauss1d')
         fitparams.append(popt)
         fiterrors.append(pcov)
 
@@ -1222,8 +1509,9 @@ def plot_etalon_fit(fitparams,fitting_flag):
             plotx = np.linspace(fitparams[i][1]-10*fitparams[i][2],fitparams[i][1]+10*fitparams[i][2],500)
             ploty = skewed_voight(plotx,*fitparams[i])
         plt.plot(plotx,ploty,'r')
+    plt.plot(plotx,ploty,'r',label='fitted lines')
 
-# normalize fringes
+#--normalize fringes
 def norm_fringe(sci_data,thres=0,min_dist=2,k=3,ext=3):
     # determine peaks
     sci_data_noNaN = sci_data.copy()
@@ -1269,7 +1557,7 @@ def cleanRD(R,D):
     numerics = np.sort(np.unique(np.array(numerics)))
     return cleanR,cleanD,numerics
 
-# find
+#--find
 def find_nearest(array,value):
     return np.abs(array-value).argmin()
 
@@ -1391,10 +1679,12 @@ def detpixel_trace_compactsource(sci_img,band,d2cMaps,offset_slice=0,verbose=Fal
     return ypos,xpos
 
 def slice_alphapositions(band,d2cMaps,sliceID=None):
-    import mrs_aux as maux
     # find how many alpha positions fill an entire slice
     det_dims = (1024,1032)
-    mrs_fwhm  = maux.MRS_FWHM[band[0]]
+    MRS_alphapix = {'1':0.196,'2':0.196,'3':0.245,'4':0.273} # arcseconds
+    MRS_FWHM = {'1':2.16*MRS_alphapix['1'],'2':3.30*MRS_alphapix['2'],
+                '3':4.04*MRS_alphapix['3'],'4':5.56*MRS_alphapix['4']} # MRS PSF
+    mrs_fwhm  = MRS_FWHM[band[0]]
 
     ypos = np.arange(det_dims[0])
     slice_img,alpha_img,alpha_img2 = np.full(det_dims,0.),np.full(det_dims,0.),np.full(det_dims,0.)
@@ -1454,17 +1744,148 @@ def slice_alphapositions(band,d2cMaps,sliceID=None):
 
     return new_alpha_positions
 
+#--slice mapping
+def slice_mapping(band,signal,signal_error,sliceMap_0percent,margin=5,stop_criterion = 5.,transm_criterion=0.9,verbose=False):
+    import pandas as pd
+    # Recommended margin value for channel 1 and 2 is 5 pixels.
+    # Recommended margin value for channel 3 and 4 is 7 pixels.
 
-# plot
+    # ids of the individual slices
+    sliceid1=[111,121,110,120,109,119,108,118,107,117,106,116,105,115,104,114,103,113,102,112,101]
+    sliceid2=[201,210,202,211,203,212,204,213,205,214,206,215,207,216,208,217,209]
+    sliceid3=[316,308,315,307,314,306,313,305,312,304,311,303,310,302,309,301]
+    sliceid4=[412,406,411,405,410,404,409,403,408,402,407,401]
+
+    if band[0]   == '1': sliceid = sliceid1
+    elif band[0] == '2': sliceid = sliceid2
+    elif band[0] == '3': sliceid = sliceid3
+    elif band[0] == '4': sliceid = sliceid4
+
+    # initialize placeholders
+    transm_img        = np.zeros((1024,1032))
+    new_sliceMap      = np.zeros((1024,1032))
+    new_sliceMap_poly = np.zeros((1024,1032))
+
+    # interpolate NaN values
+    # take care of any remaining NaN values present in the signal of channel 4
+    if band[0] =='4':axis = 1
+    else: axis = 0
+
+    signal = pd.DataFrame(signal)
+    interp_signal = signal.interpolate(method='nearest',axis=axis).as_matrix()
+
+    signal_error = pd.DataFrame(signal_error)
+    interp_signal_error = signal_error.interpolate(method='nearest',axis=axis).as_matrix()
+
+    # compute new slice map
+    for islice in sliceid:
+        if verbose is True:
+            print 'Slice {}'.format(islice)
+        for row in range(1,1023):
+            lower = np.where(sliceMap_0percent[row,:] == islice)[0][0]
+            upper = np.where(sliceMap_0percent[row,:] == islice)[0][-1]+2
+
+            xdata = np.arange(1032)[lower+margin:upper-margin]
+            ydata = interp_signal[row,lower+margin:upper-margin]
+            sigma = interp_signal_error[row,lower+margin:upper-margin]
+
+            n_poly   = 1
+            residual_change = 100.
+            residual_changes = [residual_change]
+            counter = 0
+            flag    = 0
+            while residual_change > stop_criterion:
+                counter += 1
+                popt_1     = np.polyfit(xdata,ydata,n_poly,w=1/sigma)
+                poly_1     = np.poly1d(popt_1)
+                residual_1 = (ydata-poly_1(xdata))**2
+
+                popt_2     = np.polyfit(xdata,ydata,n_poly+1,w=1/sigma)
+                poly_2     = np.poly1d(popt_2)
+                residual_2 = (ydata-poly_2(xdata))**2
+
+                residual_change = np.abs((residual_2.sum()-residual_1.sum())/residual_1.sum())*100.
+                residual_changes.append(residual_change)
+
+                n_poly+= 1
+
+                if residual_changes[counter]>residual_changes[counter-1]:
+                    flag = 1
+                    break
+
+                if n_poly == 5:
+                    break
+
+            if n_poly == 2:
+                # first iteration gives good enough fit
+                n_polynomial   = 1
+                popt     = popt_1
+                poly     = poly_1
+                residual = residual_1
+            else:
+                # n+1 iteration gives best fit
+                n_polynomial   = n_poly-1
+                popt     = popt_2
+                poly     = poly_2
+                residual = residual_2
+            if flag == 1:
+                n_polynomial   = n_poly-1
+                popt     = popt_1
+                poly     = poly_1
+                residual = residual_1
+
+            transmission = interp_signal[row,lower:upper]/poly(np.arange(1032)[lower:upper] )
+            transm_img[row,lower:upper] = transmission
+
+            min_idx = np.where(transmission>transm_criterion)[0][0]
+            max_idx = np.where(transmission>transm_criterion)[0][-1]
+
+            new_sliceMap[row,lower+min_idx+1:lower+max_idx] = islice
+    new_sliceMap[0,:] = new_sliceMap[1,:]
+    new_sliceMap[1023,:] = new_sliceMap[1022,:]
+
+    # fit polynomial solution to slice edges
+    edge_pixels_left,edge_pixels_right = {},{}
+    for islice in sliceid:
+        edge_pixels_left[str(islice)],edge_pixels_right[str(islice)] = np.zeros(1024),np.zeros(1024)
+        for row in range(1024):
+            edge_pixels_left[str(islice)][row]  = np.where(new_sliceMap[row,:] == islice)[0][0]
+            edge_pixels_right[str(islice)][row] = np.where(new_sliceMap[row,:] == islice)[0][-1]
+
+        # shifts of more than two pixels are rejected
+        for row in range(1,1024):
+            if (np.abs(edge_pixels_left[str(islice)][row]-edge_pixels_left[str(islice)][row-1]) ==2):
+                edge_pixels_left[str(islice)][row-1] = np.nan
+
+            if (np.abs(edge_pixels_right[str(islice)][row]-edge_pixels_right[str(islice)][row-1]) ==2):
+                edge_pixels_right[str(islice)][row-1] = np.nan
+
+        sel_left  = ~np.isnan(edge_pixels_left[str(islice)])
+        popt_left = np.polyfit(np.arange(1024)[sel_left],edge_pixels_left[str(islice)][sel_left],4)
+        poly_left = np.poly1d(popt_left)
+
+        sel_right  = ~np.isnan(edge_pixels_right[str(islice)])
+        popt_right = np.polyfit(np.arange(1024)[sel_right],edge_pixels_right[str(islice)][sel_right],4)
+        poly_right = np.poly1d(popt_right)
+
+        for row in range(1024):
+            assert np.around(poly_left(np.arange(1024))[row])<=np.around(poly_right(np.arange(1024))[row])+2, 'Something went wrong in the polynomial fitting'
+            new_sliceMap_poly[row,np.around(poly_left(np.arange(1024))[row]):np.around(poly_right(np.arange(1024))[row])+2] = islice
+
+    return transm_img,new_sliceMap,new_sliceMap_poly
+
+#--plot
 def plot_point_source_centroiding(band,sci_img,d2cMaps,spec_grid=None,centroid=None,ibin=None,data=None):
-    import mrs_aux as maux
     # distortion maps
     sliceMap  = d2cMaps['sliceMap']
     lambdaMap = d2cMaps['lambdaMap']
     alphaMap  = d2cMaps['alphaMap']
     betaMap   = d2cMaps['betaMap']
-    nslices   = maux.MRS_nslices[band[0]]
-    mrs_fwhm  = maux.MRS_FWHM[band[0]]
+    nslices   = d2cMaps['nslices']
+    MRS_alphapix = {'1':0.196,'2':0.196,'3':0.245,'4':0.273} # arcseconds
+    MRS_FWHM = {'1':2.16*MRS_alphapix['1'],'2':3.30*MRS_alphapix['2'],
+                '3':4.04*MRS_alphapix['3'],'4':5.56*MRS_alphapix['4']} # MRS PSF
+    mrs_fwhm  = MRS_FWHM[band[0]]
     unique_betas = np.sort(np.unique(betaMap[(sliceMap>100*int(band[0])) & (sliceMap<100*(int(band[0])+1))]))
     fov_lims  = [alphaMap[np.nonzero(lambdaMap)].min(),alphaMap[np.nonzero(lambdaMap)].max()]
     lambcens,lambfwhms = spec_grid[0],spec_grid[1]
@@ -1589,7 +2010,7 @@ def tick_function(X):
     V = 10000./X
     return ["%.2f" % z for z in V]
 
-# optical coefficients
+#--optical coefficients
 def indexOfRefractionZnS(wav):
     """ Index of refraction of Zinc Sulfide (AR coatings) according to M. R. Querry. "Optical constants of minerals and other materials from the millimeter to the ultraviolet"
     Data source: https://refractiveindex.info """
@@ -1759,22 +2180,67 @@ def ALrefract_index(dosage):
     ALextinct_coeff_interpolator = scp_interpolate.InterpolatedUnivariateSpline(Implanted_dosage,ALextinct_coeff,k=2,ext=0)
     return ALrefract_index_interpolator(dosage) + ALextinct_coeff_interpolator(dosage)*1j
 
-def buriedelectrode_transmission(workDir=None):
-    wav_data,transmission = np.genfromtxt(workDir+'transp_contact_transm_5e14implant_poly.txt',skip_header=3,usecols=(0,1),delimiter='',unpack=True)
+def buriedelectrode_transmission(wav):
+    wav_data,transmission = np.genfromtxt('/Users/ioannisa/Desktop/python/miri_devel/transp_contact_transm_5e14implant_poly.txt',skip_header=3,usecols=(0,1),delimiter='',unpack=True)
     transmission /= 100.
     # wav_data in micron
     # transmission normalized to 1
-    return wav_data,transmission
+    popt     = np.polyfit(wav_data,transmission,4)
+    poly     = np.poly1d(popt)
+    return poly(wav)
+
+def indexOfRefractionBE(wav,thickness=0.3):
+    """ Index of refraction of MIRI detector buried electrode (transparent contact)
+    Data source: Slide from Dutch Stapelbroek """
+    if thickness == 0.3:
+        # MRS band 1A to 2C
+        wav_data,n_data,k_data = np.genfromtxt('/Users/ioannisa/Desktop/python/miri_devel/optical_constants_BE_0.3um.txt',usecols=(0,1,2),unpack=True)
+    elif thickness == 2.5:
+        # MRS band 3A to 4C
+        wav_data,n_data,k_data = np.genfromtxt('/Users/ioannisa/Desktop/python/miri_devel/optical_constants_BE_2.5um.txt',usecols=(0,1,2),unpack=True)
+
+    interp_n  = scp_interpolate.interp1d(wav_data,n_data)
+    interp_k  = scp_interpolate.interp1d(wav_data,k_data)
+
+    try:
+        n,k = [],[]
+        for wvl in wav:
+            n.append(interp_n(wvl))
+            k.append(interp_k(wvl))
+        n,k = np.array(n),np.array(k)
+    except TypeError:
+        n,k = interp_n(wav),interp_k(wav)
+
+    return n+k*1j
 
 def SW_ARcoat_reflectance(workDir=None):
+    # The SW AR coating is made out of Zinc Sulphide (ZnS)
     wav_data,reflectance = np.genfromtxt(workDir+'SW_ARcoat_reflectance.txt',skip_header=4,usecols=(0,1),delimiter=',',unpack=True)
     # wav_data in micron
     # reflectance normalized to 1
     return wav_data,reflectance
 
-# transfer matrix method
-def simple_tmm(n_list,d_list,th_0,lambda_vacuum):
+def snells_law(n_list,th_0):
     from scipy import arcsin
+    n_list = np.array(n_list)
+    #------------------
+    # th_list is a list with, for each layer, the angle that the light travels
+    # through the layer. Computed with Snell's law. Note that the "angles" may be
+    # complex!
+    th_list = arcsin(n_list[0]*np.sin(th_0) / n_list)
+    return th_list
+
+#--transfer matrix method
+def make_2x2_array(a, b, c, d, dtype=float):
+    my_array = np.empty((2,2), dtype=dtype)
+    my_array[0,0] = a
+    my_array[0,1] = b
+    my_array[1,0] = c
+    my_array[1,1] = d
+    return my_array
+
+def simple_tmm(n_list,d_list,th_0,lambda_vacuum):
+    n_list,d_list = np.array(n_list),np.array(d_list)
     #------------------
     num_layers = n_list.size
     # th_list is a list with, for each layer, the angle that the light travels
@@ -1806,14 +2272,6 @@ def simple_tmm(n_list,d_list,th_0,lambda_vacuum):
         t_list_ppol[i,i+1] = 2 * n_list[i] * np.cos(th_list[i]) / (n_list[i+1] * np.cos(th_list[i]) + n_list[i] * np.cos(th_list[i+1]))
         r_list_ppol[i,i+1] = ((n_list[i+1] * np.cos(th_list[i]) - n_list[i] * np.cos(th_list[i+1])) / (n_list[i+1] * np.cos(th_list[i]) + n_list[i] * np.cos(th_list[i+1])))
     #------------------
-    def make_2x2_array(a, b, c, d, dtype=float):
-        my_array = np.empty((2,2), dtype=dtype)
-        my_array[0,0] = a
-        my_array[0,1] = b
-        my_array[1,0] = c
-        my_array[1,1] = d
-        return my_array
-
     # At the interface between the (n-1)st and nth material, let v_n be the
     # amplitude of the wave on the nth side heading forwards (away from the
     # boundary), and let w_n be the amplitude on the nth side heading backwards
@@ -1870,7 +2328,98 @@ def simple_tmm(n_list,d_list,th_0,lambda_vacuum):
 
     return R,T,A
 
-# save and load objects
+def not_simple_tmm(n_list,d_list,sig_list,th_0,lambda_vacuum):
+    from scipy import arcsin
+    n_list,d_list,sig_list = np.array(n_list),np.array(d_list),np.array(sig_list)
+    #------------------
+    num_layers = n_list.size
+    # th_list is a list with, for each layer, the angle that the light travels
+    # through the layer. Computed with Snell's law. Note that the "angles" may be
+    # complex!
+    th_list = arcsin(n_list[0]*np.sin(th_0) / n_list)
+    # kz is the z-component of (complex) angular wavevector for forward-moving
+    # wave. Positive imaginary part means decaying.
+    kz_list = 2 * np.pi * n_list * np.cos(th_list) / lambda_vacuum
+    # delta is the total phase accrued by traveling through a given layer.
+    # Ignore warning about inf multiplication
+    delta = kz_list * d_list
+    w_tilde = np.exp(- (sig_list**2. / 2.) * (4.*np.pi/lambda_vacuum)**2 )
+    #------------------
+    # t_list[i,j] and r_list[i,j] are transmission and reflection amplitudes,
+    # respectively, coming from i, going to j. Only need to calculate this when
+    # j=i+1. (2D array is overkill but helps avoid confusion.)
+
+    # s-polarization
+    t_list_spol = np.zeros((num_layers, num_layers), dtype=complex)
+    r_list_spol = np.zeros((num_layers, num_layers), dtype=complex)
+    for i in range(num_layers-1):
+        t_list_spol[i,i+1] = 2 * n_list[i] * np.cos(th_list[i]) / (n_list[i] * np.cos(th_list[i]) + n_list[i+1] * np.cos(th_list[i+1]))
+        r_list_spol[i,i+1] = w_tilde[i] * ((n_list[i] * np.cos(th_list[i]) - n_list[i+1] * np.cos(th_list[i+1])) / (n_list[i] * np.cos(th_list[i]) + n_list[i+1] * np.cos(th_list[i+1])))
+
+    # p-polarization
+    t_list_ppol = np.zeros((num_layers, num_layers), dtype=complex)
+    r_list_ppol = np.zeros((num_layers, num_layers), dtype=complex)
+    for i in range(num_layers-1):
+        t_list_ppol[i,i+1] = 2 * n_list[i] * np.cos(th_list[i]) / (n_list[i+1] * np.cos(th_list[i]) + n_list[i] * np.cos(th_list[i+1]))
+        r_list_ppol[i,i+1] = w_tilde[i] * ((n_list[i+1] * np.cos(th_list[i]) - n_list[i] * np.cos(th_list[i+1])) / (n_list[i+1] * np.cos(th_list[i]) + n_list[i] * np.cos(th_list[i+1])))
+    #------------------
+    # At the interface between the (n-1)st and nth material, let v_n be the
+    # amplitude of the wave on the nth side heading forwards (away from the
+    # boundary), and let w_n be the amplitude on the nth side heading backwards
+    # (towards the boundary). Then (v_n,w_n) = M_n (v_{n+1},w_{n+1}). M_n is
+    # M_list[n]. M_0 and M_{num_layers-1} are not defined.
+    # My M is a bit different than Sernelius's, but Mtilde is the same.
+    M_list_spol = np.zeros((num_layers, 2, 2), dtype=complex)
+    for i in range(1, num_layers-1):
+        M_list_spol[i] = (1/t_list_spol[i,i+1]) * np.dot(
+            make_2x2_array(np.exp(-1j*delta[i]), 0, 0, np.exp(1j*delta[i]),
+                           dtype=complex),
+            make_2x2_array(1, r_list_spol[i,i+1], r_list_spol[i,i+1], 1, dtype=complex))
+    Mtilde_spol = make_2x2_array(1, 0, 0, 1, dtype=complex)
+    for i in range(1, num_layers-1):
+        Mtilde_spol = np.dot(Mtilde_spol, M_list_spol[i])
+    Mtilde_spol = np.dot(make_2x2_array(1, r_list_spol[0,1], r_list_spol[0,1], 1,
+                                   dtype=complex)/t_list_spol[0,1], Mtilde_spol)
+
+    M_list_ppol = np.zeros((num_layers, 2, 2), dtype=complex)
+    for i in range(1, num_layers-1):
+        M_list_ppol[i] = (1/t_list_ppol[i,i+1]) * np.dot(
+            make_2x2_array(np.exp(-1j*delta[i]), 0, 0, np.exp(1j*delta[i]),
+                           dtype=complex),
+            make_2x2_array(1, r_list_ppol[i,i+1], r_list_ppol[i,i+1], 1, dtype=complex))
+    Mtilde_ppol = make_2x2_array(1, 0, 0, 1, dtype=complex)
+    for i in range(1, num_layers-1):
+        Mtilde_ppol = np.dot(Mtilde_ppol, M_list_ppol[i])
+    Mtilde_ppol = np.dot(make_2x2_array(1, r_list_ppol[0,1], r_list_ppol[0,1], 1,
+                                   dtype=complex)/t_list_ppol[0,1], Mtilde_ppol)
+    #------------------
+    # Net complex transmission and reflection amplitudes
+    r_spol = Mtilde_spol[1,0]/Mtilde_spol[0,0]
+    t_spol = 1/Mtilde_spol[0,0]
+
+    r_ppol = Mtilde_ppol[1,0]/Mtilde_ppol[0,0]
+    t_ppol = 1/Mtilde_ppol[0,0]
+    #------------------
+    # Net transmitted and reflected power, as a proportion of the incoming light
+    # power.
+    R_spol = abs(r_spol)**2
+    T_spol = abs(t_spol**2) * (((n_list[-1]*np.cos(th_list[-1])).real) / (n_list[0]*np.cos(th_0)).real)
+    power_entering_spol = ((n_list[0]*np.cos(th_0)*(1+np.conj(r_spol))*(1-r_spol)).real
+                         / (n_list[0]*np.cos(th_0)).real)
+
+    R_ppol = abs(r_ppol)**2
+    T_ppol = abs(t_ppol**2) * (((n_list[-1]*np.conj(np.cos(th_list[-1]))).real) / (n_list[0]*np.conj(np.cos(th_0))).real)
+    power_entering_ppol = ((n_list[0]*np.conj(np.cos(th_0))*(1+r_ppol)*(1-np.conj(r_ppol))).real
+                          / (n_list[0]*np.conj(np.cos(th_0))).real)
+    #------------------
+    # Calculates reflected and transmitted power for unpolarized light.
+    R = (R_spol + R_ppol) / 2.
+    T = (T_spol + T_ppol) / 2.
+    A = 1-R-T
+
+    return R,T,A
+
+#--save and load objects
 def save_obj(obj,name,path='' ):
     with open(path+name + '.pkl', 'wb') as f:
         pickle.dump(obj, f, pickle.HIGHEST_PROTOCOL)
@@ -1878,3 +2427,974 @@ def save_obj(obj,name,path='' ):
 def load_obj(name,path='' ):
     with open(path+name + '.pkl', 'rb') as f:
         return pickle.load(f)
+
+# interpolate nans in 1d array
+def nan_helper(y):
+    """Helper to handle indices and logical indices of NaNs.
+
+    Input:
+        - y, 1d numpy array with possible NaNs
+    Output:
+        - nans, logical indices of NaNs
+        - index, a function, with signature indices= index(logical_indices),
+          to convert logical indices of NaNs to 'equivalent' indices
+    Example:
+        >>> # linear interpolation of NaNs
+        >>> nans, x= nan_helper(y)
+        >>> y[nans]= np.interp(x(nans), x(~nans), y[~nans])
+    """
+
+    return np.isnan(y), lambda z: z.nonzero()[0]
+
+def interp_nans(y):
+    # replaces nans in 1d array by surrounding interpolated values
+    nans, x = nan_helper(y)
+    y[nans] = np.interp(x(nans), x(~nans), y[~nans])
+    return y
+
+# smooth out the signal
+def running_mean(x, N):
+    cumsum = np.cumsum(np.insert(x, 0, 0))
+    return (cumsum[N:] - cumsum[:-N]) / N
+
+#--Alvaro's functions
+def find_max(signal_cut,wavel_cut,maxcut,w_toler):
+    #from scipy.signal import argrelmax
+    #from pylab import *
+    # Removes the first and last slope so they are not identified as maxima
+    iii = 0
+    while(signal_cut[iii] < 0) or (signal_cut[iii] > signal_cut[iii+1]) or (np.isnan(signal_cut[iii])):
+        signal_cut[iii] = np.nan
+        #print iii
+        iii = iii+1
+    jjj = -1
+    while(signal_cut[jjj] < 0) or (signal_cut[jjj] > signal_cut[jjj-1]) or (np.isnan(signal_cut[jjj])):
+        signal_cut[jjj] = np.nan
+        #print jjj
+        jjj = jjj-1
+
+    # Assigns Nan to the Infs in the signal
+    isinf = np.isinf(signal_cut)
+    wcinf = where(isinf)
+    for wwwinf in wcinf:
+        signal_cut[wwwinf] = np.nan
+    # Removes the Nan in the signal
+    isnan = np.isnan(signal_cut)
+    wc = where(isnan)
+    for www in wc:
+        signal_cut[www] = 0
+
+    # Creates a temporary spectrum with everything below maxcut max is 0, so it only finds the line peaks (and no noise) as maxima.
+    print "peak value = ", max(signal_cut)
+    ws = where(signal_cut > maxcut * max(signal_cut))
+    signal_temp = np.zeros(size(signal_cut))
+    signal_temp[ws] = signal_cut[ws]+0
+
+    # Searches for the maxima (i.e. the line peaks):
+    inds_maxs_temp = [argrelmax(signal_temp)[0]]
+    maxs_w_temp = wavel_cut[inds_maxs_temp]
+    maxs_s_temp = signal_cut[inds_maxs_temp]
+
+    # Some lines are double-peaked, so I need to remove maxima for the same line:
+    for mmm in range(1,size(maxs_w_temp)):
+        if abs(maxs_w_temp[mmm]-maxs_w_temp[mmm-1]) < w_toler:
+            if maxs_s_temp[mmm] > maxs_s_temp[mmm-1]:
+                maxs_w_temp[mmm-1] = np.nan
+            else:
+                maxs_w_temp[mmm] = np.nan
+
+    # Some lines are triple-peaked, so I need to repeat the process:
+    son_nan_temp2 = np.isnan(maxs_w_temp)
+    inds_maxs_temp2 = where(son_nan_temp2 == False)
+    maxs_s_temp2 = maxs_s_temp[inds_maxs_temp2]
+    maxs_w_temp2 = maxs_w_temp[inds_maxs_temp2]
+
+    for mmm in range(1,size(maxs_w_temp2)):
+        if abs(maxs_w_temp2[mmm]-maxs_w_temp2[mmm-1]) < w_toler:
+            if maxs_s_temp2[mmm] > maxs_s_temp2[mmm-1]:
+                maxs_w_temp2[mmm-1] = np.nan
+            else:
+                maxs_w_temp2[mmm] = np.nan
+
+    # Some lines are four-times-peaked, so I need to repeat the process:
+    son_nan_temp3 = np.isnan(maxs_w_temp2)
+    inds_maxs_temp3 = where(son_nan_temp3 == False)
+    maxs_s_temp3 = maxs_s_temp2[inds_maxs_temp3]
+    maxs_w_temp3 = maxs_w_temp2[inds_maxs_temp3]
+
+    for mmm in range(1,size(maxs_w_temp3)):
+        if abs(maxs_w_temp3[mmm]-maxs_w_temp3[mmm-1]) < w_toler:
+            if maxs_s_temp3[mmm] > maxs_s_temp3[mmm-1]:
+                maxs_w_temp3[mmm-1] = np.nan
+            else:
+                maxs_w_temp3[mmm] = np.nan
+
+    #And again:
+    son_nan_temp4 = np.isnan(maxs_w_temp3)
+    inds_maxs_temp4 = where(son_nan_temp4 == False)
+    maxs_s_temp4 = maxs_s_temp3[inds_maxs_temp4]
+    maxs_w_temp4 = maxs_w_temp3[inds_maxs_temp4]
+
+    for mmm in range(1,size(maxs_w_temp4)):
+        if abs(maxs_w_temp4[mmm]-maxs_w_temp4[mmm-1]) < w_toler:
+            if maxs_s_temp4[mmm] > maxs_s_temp4[mmm-1]:
+                maxs_w_temp4[mmm-1] = np.nan
+            else:
+                maxs_w_temp4[mmm] = np.nan
+
+    #One more:
+    son_nan_temp5 = np.isnan(maxs_w_temp4)
+    inds_maxs_temp5 = where(son_nan_temp5 == False)
+    maxs_s_temp5 = maxs_s_temp4[inds_maxs_temp5]
+    maxs_w_temp5 = maxs_w_temp4[inds_maxs_temp5]
+
+    for mmm in range(1,size(maxs_w_temp5)):
+        if abs(maxs_w_temp5[mmm]-maxs_w_temp5[mmm-1]) < w_toler:
+            if maxs_s_temp5[mmm] > maxs_s_temp5[mmm-1]:
+                maxs_w_temp5[mmm-1] = np.nan
+            else:
+                maxs_w_temp5[mmm] = np.nan
+
+    # So the "cleaned" maxima are:
+    son_nan = np.isnan(maxs_w_temp5)
+    inds_maxs = where(son_nan == False)
+    maxs_s = maxs_s_temp5[inds_maxs]
+    maxs_w = maxs_w_temp5[inds_maxs]
+
+    #One more, increasing the toler value at the middle of the spectrum:
+    son_nan_temp6 = np.isnan(maxs_w_temp5)
+    inds_maxs_temp6 = where(son_nan_temp6 == False)
+    maxs_s_temp6 = maxs_s_temp5[inds_maxs_temp6]
+    maxs_w_temp6 = maxs_w_temp5[inds_maxs_temp6]
+
+    for mmm in range(1, size(maxs_w_temp6)-1):
+        if abs(maxs_w_temp6[mmm]-maxs_w_temp6[mmm+1]) < w_toler+1 and maxs_w_temp6[mmm] > 650:
+            if maxs_s_temp6[mmm] > maxs_s_temp6[mmm+1]:
+                maxs_w_temp6[mmm+1] = np.nan
+            else:
+                maxs_w_temp6[mmm] = np.nan
+        elif abs(maxs_w_temp6[mmm]-maxs_w_temp6[mmm+1]) < w_toler+4 and maxs_w_temp6[mmm] > 950:
+            if maxs_s_temp6[mmm] > maxs_s_temp6[mmm+1]:
+                maxs_w_temp6[mmm+1] = np.nan
+            else:
+                maxs_w_temp6[mmm] = np.nan
+
+    # So the "cleaned" maxima are:
+    son_nan = np.isnan(maxs_w_temp6)
+    inds_maxs = where(son_nan == False)
+    maxs_s = maxs_s_temp6[inds_maxs]
+    maxs_w = maxs_w_temp6[inds_maxs]
+
+    return maxs_s,maxs_w
+
+def find_nearest_value(array,value):
+    idx = (np.abs(array-value)).argmin()
+    return array[idx]
+
+def find_peaks2(ydata, thres=0.3, min_dist=1):
+    """Peak detection routine.
+
+    Finds the numeric index of the peaks in *y* by taking its first order difference. By using
+    *thres* and *min_dist* parameters, it is possible to reduce the number of
+    detected peaks. *y* must be signed.
+
+    Parameters
+    ----------
+    y : ndarray (signed)
+        1D amplitude ydata to search for peaks.
+    thres : float between [0., 1.]
+        Normalized threshold. Only the peaks with amplitude higher than the
+        threshold will be detected.
+    min_dist : int
+        Minimum distance between each detected peak. The peak with the highest
+        amplitude is preferred to satisfy this constraint.
+
+    Returns
+    -------
+    ndarray
+        Array containing the numeric indexes of the peaks that were detected
+    """
+    if isinstance(ydata, np.ndarray) and np.issubdtype(ydata.dtype, np.unsignedinteger):
+        raise ValueError("ydata must be signed")
+
+    y = ydata.copy()
+    y[np.isnan(y)] = 0
+
+    thres = thres * (np.max(y) - np.min(y)) + np.min(y)
+    min_dist = int(min_dist)
+
+    # compute first order difference
+    dy = np.diff(y)
+
+    # propagate left and right values successively to fill all plateau pixels (0-value)
+    zeros,=np.where(dy == 0)
+
+    while len(zeros):
+        # add pixels 2 by 2 to propagate left and right value onto the zero-value pixel
+        zerosr = np.hstack([dy[1:], 0.])
+        zerosl = np.hstack([0., dy[:-1]])
+
+        # replace 0 with right value if non zero
+        dy[zeros]=zerosr[zeros]
+        zeros,=np.where(dy == 0)
+
+        # replace 0 with left value if non zero
+        dy[zeros]=zerosl[zeros]
+        zeros,=np.where(dy == 0)
+
+    # find the peaks by using the first order difference
+    peaks = np.where((np.hstack([dy, 0.]) < 0.)
+                     & (np.hstack([0., dy]) > 0.)
+                     & (y > thres))[0]
+
+    if peaks.size > 1 and min_dist > 1:
+        highest = peaks[np.argsort(y[peaks])][::-1]
+        rem = np.ones(y.size, dtype=bool)
+        rem[peaks] = False
+
+        for peak in highest:
+            if not rem[peak]:
+                sl = slice(max(0, peak - min_dist), peak + min_dist + 1)
+                rem[sl] = True
+                rem[peak] = False
+
+        peaks = np.arange(y.size)[~rem]
+
+    return peaks
+
+#--Wavelength calibration reference point per band
+def filter_transmission(band,datapath=None,verbose=False):
+    # wavelength range of interest
+    lamblower,lambupper = mrs_aux(band)[3]
+    if band == '1B':
+        usedfilter='SWP' # Short Wavepass Filter
+        # Read the measured transmission curves from the dat files
+        # first colum is wavelength [micrometer]
+        # second and third columns are room temperature transmissions
+        # fourth column is 35K transmission
+        SWPwvnr,SWPtransm = np.genfromtxt(datapath + "swp_filter.txt", skip_header = 15, skip_footer=1, usecols=(0,3), delimiter = '',unpack='True')
+        SWPwave = 10000./SWPwvnr
+        SWPtransm = SWPtransm/100. # convert percentage to decimal
+        sel = (SWPwave>=lamblower) & (SWPwave<=lambupper)
+
+        filter_wave = SWPwave[sel]
+        filter_transm = SWPtransm[sel]
+
+    elif band == '1C':
+        usedfilter='LWP' # Long Wavepass Filter
+        # -->Read the measured transmission curves from the data files
+        # first column is wavelength [micrometer]
+        # second and third columns are room temperature transmissions
+        # fourth column is 35K transmission
+        LWPwvnr,LWPtransm = np.genfromtxt(datapath + "lwp_filter.txt", skip_header = 15, skip_footer=1, usecols=(0,3), delimiter = '',unpack='True')
+        LWPwave = 10000./LWPwvnr
+        LWPtransm = LWPtransm/100. # convert percentage to decimal
+        sel = (LWPwave>=lamblower) & (LWPwave<=lambupper)
+
+        filter_wave = LWPwave[sel]
+        filter_transm = LWPtransm[sel]
+
+    elif band == '2A':
+        usedfilter='Dichroic'
+        # Read the measured transmission curves from the csv files
+        # first colum is wavelength [micrometer]
+        # second column is room temperature transmission
+        # third column is 7K transmission
+        col = 2
+        filterWave= np.genfromtxt(datapath + "fm_dichroics_1a.csv", delimiter=";")[:,0]
+        D1A = np.genfromtxt(datapath + "fm_dichroics_1a.csv", delimiter=";")[:,col]/100.
+        D1B = np.genfromtxt(datapath + "fm_dichroics_1b.csv", delimiter=";")[:,col]/100.
+        sel = (filterWave>=lamblower) & (filterWave<=lambupper)
+
+        filter_wave = filterWave[sel]
+        filter_transm = (D1B/D1A)[sel]
+        if verbose:
+            print 'Dichroic D1B/D1A transmission ratio'
+
+    elif band == '2B':
+        usedfilter='Dichroic'
+        # Read the measured transmission curves from the csv files
+        # first colum is wavelength [micrometer]
+        # second column is room temperature transmission
+        # third column is 7K transmission
+        col = 2
+        filterWave= np.genfromtxt(datapath + "fm_dichroics_1a.csv", delimiter=";")[:,0]
+        D1B = np.genfromtxt(datapath + "fm_dichroics_1b.csv", delimiter=";")[:,col]/100.
+        D1C = np.genfromtxt(datapath + "fm_dichroics_1c.csv", delimiter=";")[:,col]/100.
+        sel = (filterWave>=lamblower) & (filterWave<=lambupper)
+
+        filter_wave = filterWave[sel]
+        filter_transm = (D1C/D1B)[sel]
+        if verbose:
+            print 'Dichroic D1C/D1B transmission ratio'
+
+    elif band == '2C':
+        usedfilter='LWP' # Long Wavepass Filter
+        # -->Read the measured transmission curves from the data files
+        # first column is wavelength [micrometer]
+        # second and third columns are room temperature transmissions
+        # fourth column is 35K transmission
+        LWPwvnr,LWPtransm = np.genfromtxt(datapath + "lwp_filter.txt", skip_header = 15, skip_footer=1, usecols=(0,3), delimiter = '',unpack='True')
+        LWPwave = 10000./LWPwvnr
+        LWPtransm = LWPtransm/100. # convert percentage to decimal
+        sel = (LWPwave>=lamblower) & (LWPwave<=lambupper)
+
+        filter_wave = LWPwave[sel]
+        filter_transm = LWPtransm[sel]
+
+    elif band == '4A':
+        usedfilter='Dichroic'
+        # Read the measured transmission curves from the csv files
+        # zeroth colum is wavelength [micrometer]
+        # first column is room temperature transmission
+        # second column is 7K transmission
+        col = 2
+        filterWave= np.genfromtxt(datapath + "fm_dichroics_1a.csv", delimiter=";")[:,0]
+        D2A = np.genfromtxt(datapath + "fm_dichroics_2a.csv", delimiter=";")[:,col]/100.
+        D3A = np.genfromtxt(datapath + "fm_dichroics_3a.csv", delimiter=";")[:,col]/100.
+        D2B = np.genfromtxt(datapath + "fm_dichroics_2b.csv", delimiter=";")[:,col]/100.
+        D3B = np.genfromtxt(datapath + "fm_dichroics_3b.csv", delimiter=";")[:,col]/100.
+        sel = (filterWave>=lamblower) & (filterWave<=lambupper)
+
+        filter_wave = filterWave[sel]
+        filter_transm = ((D2B*D3B)/(D2A*D3A))[sel]
+
+        if verbose:
+            print 'Dichroic (D2B*D3B)/(D2A*D3A) transmission ratio'
+
+    elif band == '4B':
+        usedfilter='SWP' # Short Wavepass Filter
+        # Read the measured transmission curves from the dat files
+        # first colum is wavelength [micrometer]
+        # second and third columns are room temperature transmissions
+        # fourth column is 35K transmission
+        SWPwvnr,SWPtransm = np.genfromtxt(datapath + "swp_filter.txt", skip_header = 15, skip_footer=1, usecols=(0,3), delimiter = '',unpack='True')
+        SWPwave = 10000./SWPwvnr
+        SWPtransm = SWPtransm/100. # convert percentage to decimal
+        sel = (SWPwave>=lamblower) & (SWPwave<=lambupper)
+
+        filter_wave = SWPwave[sel]
+        filter_transm = SWPtransm[sel]
+
+    elif band == '4C':
+        usedfilter='Dichroic'
+        # Read the measured transmission curves from the csv files
+        # zeroth colum is wavelength [micrometer]
+        # first column is room temperature transmission
+        # second column is 7K transmission
+        col = 2
+        filterWave= np.genfromtxt(datapath + "fm_dichroics_1a.csv", delimiter=";")[:,0]
+        D2B = np.genfromtxt(datapath + "fm_dichroics_2b.csv", delimiter=";")[:,col]/100.
+        D3B = np.genfromtxt(datapath + "fm_dichroics_3b.csv", delimiter=";")[:,col]/100.
+        D2C = np.genfromtxt(datapath + "fm_dichroics_2c.csv", delimiter=";")[:,col]/100.
+        D3C = np.genfromtxt(datapath + "fm_dichroics_3c.csv", delimiter=";")[:,col]/100.
+        sel = (filterWave>=lamblower) & (filterWave<=lambupper)
+
+        filter_wave = filterWave[sel]
+        filter_transm = ((D2C*D3C)/(D2B*D3B))[sel]
+
+    return usedfilter,filter_wave,filter_transm
+
+
+def mrs_filter_transmission(band,datapath=None):
+    # Import MRS observations
+    import mrsobs
+    if band == '1B':
+        usedfilter='SWP'
+        # swp_filter_img: SWP filter extended obs (SWP transm x 800K BB), ext_source_img: 800K BB extended source config
+
+        swp_filter_img,ext_source_img,bkg_img = mrsobs.FM_MTS_800K_BB_MRS_OPT_08(datapath,band,wp_filter=usedfilter,output='img')
+        swp_transmission_img = (swp_filter_img-bkg_img)/(ext_source_img-bkg_img)
+
+        return usedfilter,swp_filter_img,ext_source_img,swp_transmission_img
+
+    elif band == '1C':
+        usedfilter='LWP'
+        # lwp_filter_img: LWP filter extended obs (LWP transm x 800K BB), ext_source_img: 800K BB extended source config
+
+        lwp_filter_img,ext_source_img,bkg_img = mrsobs.FM_MTS_800K_BB_MRS_OPT_08(datapath,band,wp_filter=usedfilter,output='img')
+        lwp_transmission_img = (lwp_filter_img-bkg_img)/(ext_source_img-bkg_img)
+
+        return usedfilter,lwp_filter_img,ext_source_img,lwp_transmission_img
+
+    elif band == '2A':
+        usedfilter='Dichroic'
+        # top: xconfig 2AxB image, bottom: nominal 1A/2A detector image
+        cross_config = mrsobs.MIRI_internal_calibration_source(datapath,'2AxB',campaign='FM',output='img')
+        nomin_config = mrsobs.MIRI_internal_calibration_source(datapath,'2A',campaign='FM',output='img')
+        mrs_transmission_img = cross_config/nomin_config
+
+        return usedfilter,cross_config,nomin_config,mrs_transmission_img
+
+    elif band == '2B':
+        usedfilter='Dichroic'
+        # top: xconfig 2BxC image, bottom: nominal 1B/2B detector image
+        cross_config = mrsobs.MIRI_internal_calibration_source(datapath,'2BxC',campaign='FM',output='img')
+        nomin_config = mrsobs.MIRI_internal_calibration_source(datapath,'2B',campaign='FM',output='img')
+        mrs_transmission_img = cross_config/nomin_config
+
+        return usedfilter,cross_config,nomin_config,mrs_transmission_img
+
+    elif band == '2C':
+        usedfilter='LWP'
+        # lwp_filter_img: LWP filter extended obs (LWP transm x 800K BB), ext_source_img: 800K BB extended source config
+
+        lwp_filter_img,ext_source_img,bkg_img = mrsobs.FM_MTS_800K_BB_MRS_OPT_08(datapath,band,wp_filter='LWP',output='img')
+        lwp_transmission_img = (lwp_filter_img-bkg_img)/(ext_source_img-bkg_img)
+
+        return usedfilter,lwp_filter_img,ext_source_img,lwp_transmission_img
+
+    elif band == '4A':
+        usedfilter='Dichroic'
+        # top: xconfig 2BxC image, bottom: nominal 1B/2B detector image
+        cross_config = mrsobs.MIRI_internal_calibration_source(datapath,'4AxB',campaign='FM',output='img')
+        nomin_config = mrsobs.MIRI_internal_calibration_source(datapath,'4A',campaign='FM',output='img')
+        mrs_transmission_img = cross_config/nomin_config
+
+        return usedfilter,cross_config,nomin_config,mrs_transmission_img
+
+    elif band == '4B':
+        usedfilter='SWP'
+        # swp_filter_img: SWP filter extended obs (SWP transm x 800K BB), ext_source_img: 800K BB extended source config
+
+        swp_filter_img,ext_source_img,bkg_img = mrsobs.FM_MTS_800K_BB_MRS_OPT_08(datapath,band,wp_filter=usedfilter,output='img')
+        swp_transmission_img = (swp_filter_img-bkg_img)/(ext_source_img-bkg_img)
+
+        return usedfilter,swp_filter_img,ext_source_img,swp_transmission_img
+
+    elif band == '4C':
+        usedfilter='Dichroic'
+        # top: xconfig 2BxC image, bottom: nominal 1B/2B detector image
+        cross_config = mrsobs.MIRI_internal_calibration_source(datapath,'4CxB',campaign='FM',output='img')
+        nomin_config = mrsobs.MIRI_internal_calibration_source(datapath,'4C',campaign='FM',output='img')
+
+        # the division of the above two images yields a negative signal;
+        # to mitigate this we offset the signal of both images by a constant value
+        xcol = 82
+        offset = np.abs(cross_config[:,xcol][~np.isnan(cross_config[:,xcol])].min())
+        mrs_transmission_img = (nomin_config+offset)/(cross_config+offset)
+
+        return usedfilter,cross_config,nomin_config,mrs_transmission_img
+
+def get_reference_point(band,filter_wave,filter_transm,mrs_transmission,plot=False):
+    from scipy.signal import savgol_filter
+    import scipy.interpolate as scp_interpolate
+    # wavelength range of interest
+    lamblower,lambupper = mrs_aux(band)[3]
+    if band == '1B': usedfilter = 'SWP'
+    elif band == '1C': usedfilter = 'LWP'
+    elif band in ['2A','2B','4C']: usedfilter = 'Dichroic'
+
+    if band in ['1B','1C','4C']:
+        """
+        Below we compare the lab and MRS determined filter transmissions. Since the steep gradient part of the transmission
+        in the lab data shows erratic changes of slope (compared to the MRS data), rather than defining a cut-off on the steep
+        gradient part of the curve, we determine the reference wavelength/pixel pair at the location where the filter transmission
+        flattens out, i.e. where the gradient of the curve is zero. A spline is fitted through the MRS data to remove the small amplitude
+        high-frequency noise in the data.
+        """
+        # load spectrum from desired location and carry-out analysis
+        sci_fm_data = mrs_transmission
+
+        # post-processing
+        sci_fm_data[np.isnan(sci_fm_data)] = 0
+        if band == '1C':
+            # fit spline to data (smoother signal profile)
+            spl = scp_interpolate.UnivariateSpline(np.arange(len(sci_fm_data[1:-1]) ),sci_fm_data[1:-1])
+            spl.set_smoothing_factor(0.02)
+            sci_fm_data = spl(np.arange(len(sci_fm_data)))
+
+        # compute gradients and slopes
+        filter_grad = np.gradient(filter_transm,filter_wave)
+        filter_signs = np.sign(filter_grad)
+
+        if band == '1B': sci_fm_data_grad = np.gradient(savgol_filter(sci_fm_data[np.nonzero(sci_fm_data)],21,3))
+        elif band == '1C': sci_fm_data_grad = np.gradient(sci_fm_data)
+        elif band == '4C': sci_fm_data_grad = np.gradient(savgol_filter(sci_fm_data[np.nonzero(sci_fm_data)],51,3))
+        sci_fm_data_signs = np.sign(sci_fm_data_grad)
+
+        # filter regions as necessary
+        if band == '1B':
+            filter_signs[:find_nearest(filter_wave,6.44)] = 0
+            sci_fm_data_signs[:800] = 0
+        elif band == '4C':
+            sci_fm_data_signs[:400] = 0
+
+        filter_zerocrossing = np.where(np.abs(np.diff(filter_signs)) == 2)[0]
+        sci_fm_data_zerocrossing = np.where(np.abs(np.diff(sci_fm_data_signs)) == 2)[0]
+        if band == '4C':
+            sci_fm_data_zerocrossing = np.where(np.abs(np.diff(sci_fm_data_signs[575:600])) == 2)[0]
+            sci_fm_data_zerocrossing += 575
+
+        x0 = filter_wave[filter_zerocrossing[0]]
+        x1 = filter_wave[filter_zerocrossing[0]+1]
+        y0 = filter_grad[filter_zerocrossing[0]]
+        y1 = filter_grad[filter_zerocrossing[0]+1]
+        a = (y1-y0)/(x1-x0)
+        cutofflamb = (-y0/a) + x0
+
+        x0 = sci_fm_data_zerocrossing[0]
+        x1 = np.arange(len(sci_fm_data))[sci_fm_data_zerocrossing[0]+1]
+        y0 = sci_fm_data_grad[sci_fm_data_zerocrossing[0]]
+        y1 = sci_fm_data_grad[sci_fm_data_zerocrossing[0]+1]
+        a = (y1-y0)/(x1-x0)
+        cutoffpix = (-y0/a) + x0
+
+        if plot:
+            fig,axs = plt.subplots(1,2,figsize=(12,4))
+            axs[0].plot(filter_wave,filter_transm)
+            axs[0].set_xlim(lamblower,lambupper)
+            axs[0].set_xlabel('Wavelength [micron]',fontsize=12)
+            axs[0].set_ylabel('Transmission',fontsize=12)
+            axs[0].set_title('{} filter transmission (lab data)'.format(usedfilter),fontsize=12)
+            axs[1].plot(sci_fm_data[np.nonzero(sci_fm_data)],label='original data')
+            if band == '1B':
+                axs[1].plot(savgol_filter(sci_fm_data[np.nonzero(sci_fm_data)],21,3),'r',label='smoothed data')
+                axs[1].legend(loc='lower left',fontsize=12)
+            axs[1].set_xlim(-40,1064)
+            axs[1].set_xlabel('Y-pixel',fontsize=12)
+            axs[1].set_title('{} filter transmission (MRS data)'.format(usedfilter),fontsize=12)
+            for plot in range(2): axs[plot].tick_params(axis='both',labelsize=12)
+            plt.tight_layout()
+
+            fig,axs = plt.subplots(2,1,figsize=(12,8))
+            plt.suptitle('Cut-off wavelength {}micron located at pixel {}'.format(round(cutofflamb,2),round(cutoffpix,2) ),fontsize=12)
+            if band == '1B': lower0,upper0 = -0.001,0.0022; lower1,upper1 = -0.004,0.008;
+            elif band == '1C': lower0,upper0 =  -0.001,0.004; lower1,upper1 = -0.004,0.008
+            axs[0].plot(filter_wave,np.gradient(filter_transm,filter_wave),'b')
+            axs[0].hlines(0,lamblower,lambupper)
+            axs[0].vlines(cutofflamb,lower0,upper0,linestyle='dashed',label='reference point')
+            axs[0].set_xlim(lamblower,lambupper)
+            axs[0].set_ylim(lower0,upper0)
+            if band == '1B':
+                axs[1].plot(np.gradient(savgol_filter(sci_fm_data[np.nonzero(sci_fm_data)],21,3)),'r')
+            elif band == '4C':
+                axs[1].plot(np.gradient(savgol_filter(sci_fm_data[np.nonzero(sci_fm_data)],51,3)),'r')
+            else:
+                axs[1].plot(np.gradient(sci_fm_data[np.nonzero(sci_fm_data)]),'r')
+            axs[1].hlines(0,0,1024)
+            axs[1].vlines(cutoffpix,lower1,upper1,linestyle='dashed',label='reference point')
+            axs[1].set_xlim(0,1023)
+            axs[1].set_ylim(lower1,upper1)
+            axs[0].set_xlabel('Wavelength [micron]',fontsize=12)
+            axs[0].set_ylabel('INTA {} transm gradient'.format(usedfilter),fontsize=12)
+            axs[1].set_xlabel('Y-pixel',fontsize=12)
+            axs[1].set_ylabel('RAL {} transm gradient'.format(usedfilter),fontsize=12)
+            for plot in range(2):
+                axs[plot].tick_params(axis='both',labelsize=12)
+                axs[plot].legend(loc='upper right',fontsize=12)
+            plt.tight_layout(rect=[0, 0.03, 1, 0.98])
+
+        if band == '1C':
+            print 'The result is senstive to spl.set_smoothing_factor'
+
+    elif band == '2A':
+        # define cut-off wavelength
+        cutofflamb = 8.17
+        # load spectrum from desired location and carry-out analysis
+        sci_fm_data = mrs_transmission
+        # Relate transmission values in wavelength space and in pixel space
+        matched_wavls = np.full(len(sci_fm_data),np.nan)
+        sel = (filter_wave>7.4) & (filter_wave<8.4) # Take range around cut-off (== 8.17 microns)
+
+        for i in range(len(sci_fm_data)):
+            matched_wavls[i] = filter_wave[sel][np.abs(filter_transm[sel]-sci_fm_data[i]).argmin()]
+
+        popt = np.polyfit(np.arange(len(sci_fm_data))[400:600],matched_wavls[400:600],1)
+        cutoffpix = (cutofflamb-popt[1])/popt[0]
+
+        if plot:
+            fig,axs = plt.subplots(1,2,figsize=(12,4))
+            axs[0].plot(filter_wave,filter_transm)
+            axs[0].set_xlim(lamblower,lambupper)
+            axs[0].set_xlabel('Wavelength [micron]',fontsize=12)
+            axs[0].set_ylabel('Transmission',fontsize=12)
+            axs[0].set_title('{} filter transmission (lab data)'.format(usedfilter),fontsize=12)
+            axs[1].plot(sci_fm_data[np.nonzero(sci_fm_data)],label='original data')
+            axs[1].set_xlim(-40,1064)
+            axs[1].set_xlabel('Y-pixel',fontsize=12)
+            axs[1].set_title('{} filter transmission (MRS data)'.format(usedfilter),fontsize=12)
+            for plot in range(2): axs[plot].tick_params(axis='both',labelsize=12)
+            plt.tight_layout()
+
+            plt.figure(figsize=(8,6))
+            plt.plot(np.arange(1024),matched_wavls,label='wavelength-pixel transmission relation')
+            plt.plot(straight_line(np.arange(1024),*popt),label='fit')
+            plt.plot(cutoffpix,cutofflamb,'ro',label='reference wavelength-pixel pair')
+            plt.vlines(cutoffpix,7.4,8.4)
+            plt.hlines(cutofflamb,-40,600)
+            plt.xlim(-40,600)
+            plt.ylim(7.4,8.4)
+            plt.xlabel('Y coordinate [pix]',fontsize=12)
+            plt.ylabel('Wavelength [micron]',fontsize=12)
+            plt.suptitle('Cut-off wavelength {}micron located at pixel {}'.format(cutofflamb,round(cutoffpix,2) ),fontsize=12)
+            plt.legend(loc='lower right')
+            plt.tick_params(axis='both',labelsize=12)
+            plt.tight_layout(rect=[0, 0.03, 1, 0.98])
+
+    elif band == '2B':
+        # # define cut-off wavelength
+        # cutofflamb = 8.74
+        # # load spectrum from desired location and carry-out analysis
+        # sci_fm_data = mrs_transmission
+        # # Relate transmission values in wavelength space and in pixel space
+        # matched_wavls = np.full(len(sci_fm_data),np.nan)
+        #
+        # for i in range(len(sci_fm_data)):
+        #     matched_wavls[i] = filter_wave[np.abs(filter_transm-sci_fm_data[i]).argmin()]
+        #
+        # popt = np.polyfit(np.arange(len(sci_fm_data))[:80],matched_wavls[:80],1)
+        # fit = np.poly1d(popt)
+        # cutoffpix = (cutofflamb-popt[1])/popt[0]
+        # if plot:
+        #     fig,axs = plt.subplots(1,2,figsize=(12,4))
+        #     axs[0].plot(filter_wave,filter_transm)
+        #     axs[0].set_xlim(lamblower,lambupper)
+        #     axs[0].set_xlabel('Wavelength [micron]',fontsize=12)
+        #     axs[0].set_ylabel('Transmission',fontsize=12)
+        #     axs[0].set_title('{} filter transmission (lab data)'.format(usedfilter),fontsize=12)
+        #     axs[1].plot(sci_fm_data[np.nonzero(sci_fm_data)],label='original data')
+        #     axs[1].set_xlim(-40,1064)
+        #     axs[1].set_xlabel('Y-pixel',fontsize=12)
+        #     axs[1].set_title('{} filter transmission (MRS data)'.format(usedfilter),fontsize=12)
+        #     for plot in range(2): axs[plot].tick_params(axis='both',labelsize=12)
+        #     plt.tight_layout()
+        #
+        #     plt.figure(figsize=(8,6))
+        #     plt.plot(np.arange(1024),matched_wavls,label='wavelength-pixel transmission relation')
+        #     plt.plot(fit(np.arange(1024)),label='fit')
+        #     plt.plot(cutoffpix,cutofflamb,'ro',label='reference wavelength-pixel pair')
+        #     plt.vlines(cutoffpix,lamblower,lambupper)
+        #     plt.hlines(cutofflamb,-10,90)
+        #     plt.xlim(-10,90)
+        #     plt.ylim(lamblower,8.81)
+        #     plt.xlabel('Y-pixel',fontsize=12)
+        #     plt.ylabel('Wavelength [micron]',fontsize=12)
+        #     plt.suptitle('Cut-off wavelength {}micron located at pixel {}'.format(cutofflamb,round(cutoffpix,2) ),fontsize=12)
+        #     plt.legend(loc='lower right')
+        #     plt.tick_params(axis='both',labelsize=12)
+        #     plt.tight_layout(rect=[0, 0.03, 1, 0.98])
+
+        # load spectrum from desired location and carry-out analysis
+        sci_fm_data = mrs_transmission
+
+        # post-processing
+        sci_fm_data[np.isnan(sci_fm_data)] = 0
+        if band == '1C':
+            # fit spline to data (smoother signal profile)
+            spl = scp_interpolate.UnivariateSpline(np.arange(len(sci_fm_data[1:-1]) ),sci_fm_data[1:-1])
+            spl.set_smoothing_factor(0.02)
+            sci_fm_data = spl(np.arange(len(sci_fm_data)))
+
+        # compute gradients and slopes
+        filter_grad = np.gradient(filter_transm,filter_wave)
+        filter_signs = np.sign(filter_grad)
+
+        sci_fm_data_grad = np.gradient(savgol_filter(sci_fm_data[np.nonzero(sci_fm_data)],51,3))
+        sci_fm_data_signs = np.sign(sci_fm_data_grad)
+
+        filter_zerocrossing = np.where(np.abs(np.diff(filter_signs)) == 2)[0]
+        sci_fm_data_zerocrossing = np.where(np.abs(np.diff(sci_fm_data_signs)) == 2)[0]
+
+        x0 = filter_wave[filter_zerocrossing[0]]
+        x1 = filter_wave[filter_zerocrossing[0]+1]
+        y0 = filter_grad[filter_zerocrossing[0]]
+        y1 = filter_grad[filter_zerocrossing[0]+1]
+        a = (y1-y0)/(x1-x0)
+        cutofflamb = (-y0/a) + x0
+
+        x0 = sci_fm_data_zerocrossing[0]
+        x1 = np.arange(len(sci_fm_data))[sci_fm_data_zerocrossing[0]+1]
+        y0 = sci_fm_data_grad[sci_fm_data_zerocrossing[0]]
+        y1 = sci_fm_data_grad[sci_fm_data_zerocrossing[0]+1]
+        a = (y1-y0)/(x1-x0)
+        cutoffpix = (-y0/a) + x0
+
+        if plot:
+            fig,axs = plt.subplots(1,2,figsize=(12,4))
+            axs[0].plot(filter_wave,filter_transm)
+            axs[0].set_xlim(lamblower,lambupper)
+            axs[0].set_xlabel('Wavelength [micron]',fontsize=12)
+            axs[0].set_ylabel('Transmission',fontsize=12)
+            axs[0].set_title('{} filter transmission (lab data)'.format(usedfilter),fontsize=12)
+            axs[1].plot(sci_fm_data[np.nonzero(sci_fm_data)],label='original data')
+            axs[1].plot(savgol_filter(sci_fm_data[np.nonzero(sci_fm_data)],51,3),'r',label='smoothed data')
+            axs[1].legend(loc='lower right',fontsize=12)
+            axs[1].set_xlim(-40,1064)
+            axs[1].set_xlabel('Y-pixel',fontsize=12)
+            axs[1].set_title('{} filter transmission (MRS data)'.format(usedfilter),fontsize=12)
+            for plot in range(2): axs[plot].tick_params(axis='both',labelsize=12)
+            plt.tight_layout()
+
+            fig,axs = plt.subplots(2,1,figsize=(12,8))
+            plt.suptitle('Cut-off wavelength {}micron located at pixel {}'.format(round(cutofflamb,2),round(cutoffpix,2) ),fontsize=12)
+            lower0,upper0 = -0.001,0.007; lower1,upper1 = -0.004,0.013;
+            axs[0].plot(filter_wave,np.gradient(filter_transm,filter_wave),'b')
+            axs[0].hlines(0,lamblower,lambupper)
+            axs[0].vlines(cutofflamb,lower0,upper0,linestyle='dashed',label='reference point')
+            axs[0].set_xlim(lamblower,lambupper)
+            axs[0].set_ylim(lower0,upper0)
+            axs[1].plot(sci_fm_data_grad,'r')
+            axs[1].hlines(0,0,1024)
+            axs[1].vlines(cutoffpix,lower1,upper1,linestyle='dashed',label='reference point')
+            axs[1].set_xlim(0,1023)
+            axs[1].set_ylim(lower1,upper1)
+            axs[0].set_xlabel('Wavelength [micron]',fontsize=12)
+            axs[0].set_ylabel('INTA {} transm gradient'.format(usedfilter),fontsize=12)
+            axs[1].set_xlabel('Y-pixel',fontsize=12)
+            axs[1].set_ylabel('FM {} transm gradient'.format(usedfilter),fontsize=12)
+            for plot in range(2):
+                axs[plot].tick_params(axis='both',labelsize=12)
+                axs[plot].legend(loc='upper right',fontsize=12)
+            plt.tight_layout(rect=[0, 0.03, 1, 0.98])
+
+    elif band == '2C':
+        # load spectrum from desired location and carry-out analysis
+        sci_fm_data = mrs_transmission
+        sci_fm_data = interp_nans(sci_fm_data)
+
+        # fit spline to data (smoother signal profile)
+        spl = scp_interpolate.UnivariateSpline(np.arange(len(sci_fm_data[1:-1]) ),sci_fm_data[1:-1])
+        spl.set_smoothing_factor(0.1)
+        sci_fm_data = spl(np.arange(len(sci_fm_data)))
+
+        # Reference wavelength/pixel pair defined by matching zero-crossing of gradient of INTA and FM LWP transmission
+        sci_fm_data_grad = np.gradient(sci_fm_data)
+        sci_fm_data_signs = np.sign(sci_fm_data_grad)
+
+        sci_fm_data_zerocrossing = np.where(np.abs(np.diff(sci_fm_data_signs[870:920])) == 2)[0]
+
+        cutofflamb = filter_wave[np.argmin(filter_transm)]
+
+        x0 = 870+sci_fm_data_zerocrossing
+        x1 = np.arange(len(sci_fm_data))[870+sci_fm_data_zerocrossing[0]+1]
+        y0 = sci_fm_data_grad[sci_fm_data_zerocrossing[0]]
+        y1 = sci_fm_data_grad[sci_fm_data_zerocrossing[0]+1]
+        a = (y1-y0)/(x1-x0)
+        cutoffpix = (-y0/a) + x0
+
+        if plot:
+            fig,axs = plt.subplots(1,2,figsize=(12,5))
+            axs[0].plot(filter_wave,filter_transm)
+            axs[0].set_xlim(lamblower,lambupper)
+            axs[0].set_xlabel('Wavelength [micron]',fontsize=12)
+            axs[0].set_ylabel('Transmission',fontsize=12)
+            axs[0].set_title('LWP filter transmission (lab data)',fontsize=12)
+            axs[1].plot(mrs_transmission,label='original data')
+            axs[1].plot(spl(np.arange(len(sci_fm_data))),'r',label='smoothed data')
+            axs[1].legend(loc='lower right',fontsize=12)
+            axs[1].set_xlim(-40,1064)
+            axs[1].set_xlabel('Y-pixel',fontsize=12)
+            axs[1].set_title('LWP filter transmission (MRS data)',fontsize=12)
+            for plot in range(2): axs[plot].tick_params(axis='both',labelsize=12)
+            plt.tight_layout()
+
+            fig,axs = plt.subplots(2,1,figsize=(12,8))
+            plt.suptitle('Cut-off wavelength {}micron located at pixel {}'.format(round(cutofflamb,2),round(cutoffpix,2) ),fontsize=12)
+            axs[0].plot(filter_wave,np.gradient(filter_transm,filter_wave),'b')
+            axs[0].hlines(0,lamblower,lambupper)
+            axs[0].vlines(cutofflamb,-0.0002,0.0002,linestyle='dashed',label='reference point')
+            axs[0].set_xlim(lamblower,lambupper)
+            axs[1].plot(np.gradient(spl(np.arange(1024))),'r')
+            axs[1].hlines(0,633,1024)
+            axs[1].vlines(cutoffpix,-0.001,0.001,linestyle='dashed',label='reference point')
+            axs[1].set_xlim(633,1023)
+            axs[1].set_ylim(-0.001,0.001)
+            axs[0].set_xlabel('Wavelength [micron]',fontsize=12)
+            axs[0].set_ylabel('INTA LWP transm gradient',fontsize=12)
+            axs[1].set_xlabel('Y-pixel',fontsize=12)
+            axs[1].set_ylabel('FM LWP transm gradient',fontsize=12)
+            for plot in range(2):
+                axs[plot].tick_params(axis='both',labelsize=12)
+                axs[plot].legend(loc='upper right',fontsize=12)
+            plt.tight_layout(rect=[0, 0.03, 1, 0.98])
+
+    elif band == '4A':
+        # load spectrum from desired location and carry-out analysis
+        sci_fm_data = mrs_transmission
+        sci_fm_data = interp_nans(sci_fm_data)
+
+        # signal post-processing
+        sci_fm_data = savgol_filter(sci_fm_data,201,2)
+
+        # compute gradients and slopes
+        filter_grad = np.gradient(filter_transm,filter_wave)
+
+        sci_fm_data_grad = np.gradient(sci_fm_data)
+        sci_fm_data_grad_filter = savgol_filter(sci_fm_data_grad,51,2)
+
+        cutofflamb = filter_wave[np.argmax(filter_grad)]
+        cutoffpix  = sci_fm_data_grad_filter.argmax() # wavelength maps of channels 3 and 4 are inverted!
+
+        if plot:
+            fig,axs = plt.subplots(1,2,figsize=(12,6))
+            axs[0].plot(filter_wave,filter_transm,label='lab data transmission')
+            axs[0].set_xlim(lamblower,lambupper)
+            axs[0].set_ylim(0,1.41)
+            axs[0].tick_params(axis='both',labelsize=20)
+            axs[0].legend(loc='upper right',framealpha=0.4,fontsize=14)
+            axs[0].set_xlabel('Wavelength [micron]',fontsize=20)
+            axs[0].set_ylabel('Transmission',fontsize=20)
+            axs[1].plot(mrs_transmission,label='FM transmission')
+            axs[1].plot(sci_fm_data,label='filtered signal')
+            axs[1].set_xlim(-40,1064)
+            axs[1].set_ylim(0,1.41)
+            axs[1].set_xlabel('Y-coordinate [pix]',fontsize=20)
+            axs[1].tick_params(axis='both',labelsize=20)
+            axs[1].legend(loc='upper right',framealpha=0.4,fontsize=14)
+            plt.tight_layout()
+
+            fig,axs = plt.subplots(2,1,figsize=(12,10))
+            axs[0].plot(filter_wave,filter_grad)
+            axs[0].hlines(0,lamblower,lambupper)
+            axs[0].vlines(cutofflamb,-0.001,0.004)
+            axs[0].set_xlim(lamblower,lambupper)
+            axs[0].set_ylim(-0.0002,0.001)
+            # axs[1].plot(sci_fm_data_grad)
+            axs[1].plot(sci_fm_data_grad_filter)
+            axs[1].hlines(0,0,1024)
+            axs[1].vlines(cutoffpix,-0.004,0.008)
+            axs[1].set_xlim(0,1023)
+            axs[1].set_ylim(-0.002,0.008)
+            axs[0].set_xlabel('Wavelength [micron]',fontsize=20)
+            axs[0].set_ylabel('lab transm gradient',fontsize=20)
+            axs[1].set_xlabel('Detector y-coord [pix]',fontsize=20)
+            axs[1].set_ylabel('Transm gradient',fontsize=20)
+            for plot in range(2):axs[plot].tick_params(axis='both',labelsize=20)
+            plt.tight_layout()
+
+    elif band == '4B':
+        # load spectrum from desired location and carry-out analysis
+        sci_fm_data = mrs_transmission
+        sci_fm_data = interp_nans(sci_fm_data)
+
+        # signal post-processing
+        sci_fm_data = savgol_filter(sci_fm_data,51,2)
+
+        # compute gradients and slopes
+        filter_grad = np.gradient(filter_transm,filter_wave)
+
+        sci_fm_data_grad = np.gradient(sci_fm_data)
+        sci_fm_data_grad_filter = savgol_filter(sci_fm_data_grad,51,2)
+
+        cutofflamb = filter_wave[np.argmin(filter_grad)]
+        cutoffpix  = sci_fm_data_grad_filter.argmin() # wavelength maps of channels 3 and 4 are inverted!
+
+        if plot:
+            fig,axs = plt.subplots(1,2,figsize=(12,6))
+            axs[0].plot(filter_wave,filter_transm,label='lab data transmission')
+            axs[0].set_xlim(lamblower,lambupper)
+            axs[0].set_ylim(min(filter_transm),max(filter_transm))
+            axs[0].tick_params(axis='both',labelsize=20)
+            axs[0].legend(loc='upper right',framealpha=0.4,fontsize=14)
+            axs[0].set_xlabel('Wavelength [micron]',fontsize=20)
+            axs[0].set_ylabel('Transmission',fontsize=20)
+            axs[1].plot(mrs_transmission,label='FM transmission')
+            axs[1].plot(sci_fm_data,label='filtered signal')
+            axs[1].set_xlim(-40,1064)
+            axs[1].set_ylim(min(sci_fm_data),max(sci_fm_data))
+            axs[1].set_xlabel('Y-coordinate [pix]',fontsize=20)
+            axs[1].tick_params(axis='both',labelsize=20)
+            axs[1].legend(loc='upper right',framealpha=0.4,fontsize=14)
+            plt.tight_layout()
+
+            fig,axs = plt.subplots(2,1,figsize=(12,10))
+            axs[0].plot(filter_wave,filter_grad)
+            axs[0].hlines(0,lamblower,lambupper)
+            axs[0].vlines(cutofflamb,min(filter_grad),max(filter_grad))
+            axs[0].set_xlim(lamblower,lambupper)
+            axs[0].set_ylim(min(filter_grad),max(filter_grad))
+            # axs[1].plot(sci_fm_data_grad)
+            axs[1].plot(sci_fm_data_grad_filter)
+            axs[1].hlines(0,0,1024)
+            axs[1].vlines(cutoffpix,min(sci_fm_data_grad_filter),max(sci_fm_data_grad_filter))
+            axs[1].set_xlim(0,1023)
+            axs[1].set_ylim(min(sci_fm_data_grad_filter),max(sci_fm_data_grad_filter))
+            axs[0].set_xlabel('Wavelength [micron]',fontsize=20)
+            axs[0].set_ylabel('lab transm gradient',fontsize=20)
+            axs[1].set_xlabel('Detector y-coord [pix]',fontsize=20)
+            axs[1].set_ylabel('Transm gradient',fontsize=20)
+            for plot in range(2):axs[plot].tick_params(axis='both',labelsize=20)
+            plt.tight_layout()
+
+
+    return cutofflamb,cutoffpix
+
+#--slice offset
+def slice_pix_offset(band,ref_source_img,second_source_img,pos_of_ref='right',plot=False):
+    from scipy.interpolate import interp1d
+    # select range of pixels
+    if band[0] in ['1','4']: lower,upper = 10,502
+    elif band[0] in ['2','3']: lower,upper = 522,1010
+
+    pix_offsets = []
+    rows = np.arange(50,1000,50)
+    for row in np.arange(50,1000,50):
+        sci_fm_data_ref = ref_source_img[row,:][lower:upper]
+
+        # create a finer grid
+        step = 0.02
+        fine_grid = np.arange(lower,upper-1+step,step)
+        sci_fm_data_ref_fine = interp1d(lower+np.arange(len(sci_fm_data_ref)),sci_fm_data_ref)(fine_grid)
+
+        offsets = np.arange(1,100)
+        wider_offsets = np.arange(-40,100)
+
+        sci_fm_data = second_source_img[row,:][lower:upper]
+        sci_fm_data_fine = interp1d(lower+np.arange(len(sci_fm_data)),sci_fm_data)(fine_grid)
+
+        # polynomial fit order
+        residuals = []
+        for offset in offsets:
+            if pos_of_ref=='right':
+                residuals.append(np.sum(((sci_fm_data_ref_fine[offset:]-sci_fm_data_fine[:-offset])[~np.isnan(sci_fm_data_ref_fine[offset:]-sci_fm_data_fine[:-offset])])[:-100]**2))
+            elif pos_of_ref=='left':
+                residuals.append(np.sum(((sci_fm_data_fine[offset:]-sci_fm_data_ref_fine[:-offset])[~np.isnan(sci_fm_data_fine[offset:]-sci_fm_data_ref_fine[:-offset])])[:-100]**2))
+        residuals = np.array(residuals)
+
+        popt     = np.polyfit(offsets,residuals,4)
+        poly     = np.poly1d(popt)
+
+        pix_offset = wider_offsets[np.argmin(poly(wider_offsets))]*step
+        pix_offsets.append(pix_offset)
+
+        if plot:
+            if row == 500.:
+                plt.figure(figsize=(12,4))
+                plt.title('Row {}'.format(row))
+                plt.plot(sci_fm_data_ref_fine,label='FM data')
+                plt.plot(sci_fm_data_fine,label='CV3 data')
+                plt.legend(loc='lower right')
+                plt.tight_layout()
+
+                plt.figure(figsize=(12,4))
+                plt.title('Row {}'.format(row))
+                plt.plot(offsets*step,residuals,'bo')
+                plt.plot(wider_offsets*step,poly(wider_offsets),'r')
+                plt.xlabel('Slice pixel offset [pix]')
+                plt.ylabel(r'residuals^2')
+                plt.tight_layout()
+    if plot:
+        plt.figure(figsize=(12,4))
+        plt.plot(np.arange(50,1000,50),pix_offsets,'bo')
+        plt.xlabel('Detector row')
+        plt.ylabel('Slice pixel offset [pix]')
+        plt.tight_layout()
+
+    pix_offsets = np.array(pix_offsets)
+    return rows,pix_offsets
+
+def sort_lists(X,Y):
+    # sort first list (X) based on values of second list (Y)
+    """
+    From: https://stackoverflow.com/questions/6618515/sorting-list-based-on-values-from-another-list
+    I have a list of strings like this:
+
+    X = ["a", "b", "c", "d", "e", "f", "g", "h", "i"]
+    Y = [ 0,   1,   1,    0,   1,   2,   2,   0,   1]
+    What is the shortest way of sorting X using values from Y to get the following output?
+
+    ["a", "d", "h", "b", "c", "e", "i", "f", "g"]
+    """
+    # answer:
+    return np.sort(Y),[x for _,x in sorted(zip(Y,X))]

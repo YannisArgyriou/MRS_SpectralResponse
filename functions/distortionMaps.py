@@ -35,8 +35,7 @@ plt.show()
 
 import numpy as np
 
-def d2cMapping(band,cdpDir,fileversion = "06.04.00"):
-    from miri.datamodels.cdp import MiriMrsDistortionModel12, MiriMrsDistortionModel34
+def d2cMapping(band,cdpDir,slice_transmission='80pc',fileversion = "06.04.00"):
 
     # all MRS distortion files
     distcdp = {}
@@ -58,38 +57,50 @@ def d2cMapping(band,cdpDir,fileversion = "06.04.00"):
 
 
     # import parameters needed for d2c mapping
+    if fileversion[:5] == '7B.05':
+        from astropy.io import fits
+        dist = fits.open(cdpDir+distcdp[band])
+        alphaPoly = dist['Alpha_CH{}'.format(band[0])].data
+        lambdaPoly = dist['Lambda_CH{}'.format(band[0])].data
+        bdel = dist[0].header['B_DEL{}'.format(band[0])]
+        bzero = dist[0].header['B_ZERO{}'.format(band[0])]
 
-    if band in ["1A", "1B", "1C"]:
-        dist = MiriMrsDistortionModel12(cdpDir + distcdp[band])
-        alphaPoly = dist.alpha_ch1
-        lambdaPoly = dist.lambda_ch1
-        sliceMap = dist.slicenumber
-        bdel = dist.meta.instrument.bdel1
-        bzero = dist.meta.instrument.bzero1
+        slice_idx = int(slice_transmission[0])-1
+        sliceMap = dist['Slice_Number'].data[slice_idx,:,:]
 
-    if band in ["2A", "2B", "2C"]:
-        dist = MiriMrsDistortionModel12(cdpDir + distcdp[band])
-        alphaPoly = dist.alpha_ch2
-        lambdaPoly = dist.lambda_ch2
-        sliceMap = dist.slicenumber
-        bdel = dist.meta.instrument.bdel2
-        bzero = dist.meta.instrument.bzero2
+    else:
+        from miri.datamodels.cdp import MiriMrsDistortionModel12, MiriMrsDistortionModel34
+        if band in ["1A", "1B", "1C"]:
+            dist = MiriMrsDistortionModel12(cdpDir + distcdp[band])
+            alphaPoly = dist.alpha_ch1
+            lambdaPoly = dist.lambda_ch1
+            sliceMap = dist.slicenumber
+            bdel = dist.meta.instrument.bdel1
+            bzero = dist.meta.instrument.bzero1
 
-    if band in ["3A", "3B", "3C"]:
-        dist = MiriMrsDistortionModel34(cdpDir + distcdp[band])
-        alphaPoly = dist.alpha_ch3
-        lambdaPoly = dist.lambda_ch3
-        sliceMap = dist.slicenumber
-        bdel = dist.meta.instrument.bdel3
-        bzero = dist.meta.instrument.bzero3
+        if band in ["2A", "2B", "2C"]:
+            dist = MiriMrsDistortionModel12(cdpDir + distcdp[band])
+            alphaPoly = dist.alpha_ch2
+            lambdaPoly = dist.lambda_ch2
+            sliceMap = dist.slicenumber
+            bdel = dist.meta.instrument.bdel2
+            bzero = dist.meta.instrument.bzero2
 
-    if band in ["4A", "4B", "4C"]:
-        dist = MiriMrsDistortionModel34(cdpDir + distcdp[band])
-        alphaPoly = dist.alpha_ch4
-        lambdaPoly = dist.lambda_ch4
-        sliceMap = dist.slicenumber
-        bdel = dist.meta.instrument.bdel4
-        bzero = dist.meta.instrument.bzero4
+        if band in ["3A", "3B", "3C"]:
+            dist = MiriMrsDistortionModel34(cdpDir + distcdp[band])
+            alphaPoly = dist.alpha_ch3
+            lambdaPoly = dist.lambda_ch3
+            sliceMap = dist.slicenumber
+            bdel = dist.meta.instrument.bdel3
+            bzero = dist.meta.instrument.bzero3
+
+        if band in ["4A", "4B", "4C"]:
+            dist = MiriMrsDistortionModel34(cdpDir + distcdp[band])
+            alphaPoly = dist.alpha_ch4
+            lambdaPoly = dist.lambda_ch4
+            sliceMap = dist.slicenumber
+            bdel = dist.meta.instrument.bdel4
+            bzero = dist.meta.instrument.bzero4
 
     # create maps with wavelengths, alpha and beta coordinates and pixel size
 
